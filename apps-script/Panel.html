@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  body { margin: 0; padding: 14px; background: #141418; color: #f2f2f5; font-size: 13px; }
+  h1 { margin: 0 0 2px; font-size: 18px; color: #ff5fa2; }
+  .sub { color: #8a8a96; font-size: 12px; margin-bottom: 14px; }
+  .card { background: #1c1c22; border: 1px solid #2c2c36; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  label { display: block; color: #c8c8d2; font-size: 12px; margin: 6px 0 4px; }
+  input { width: 100%; background: #24242c; color: #f2f2f5; border: 1px solid #34343f; border-radius: 8px; padding: 8px; font-size: 13px; }
+  input:focus { outline: none; border-color: #ff5fa2; }
+  button { cursor: pointer; border-radius: 8px; font-size: 12px; padding: 7px 10px; border: 1px solid #34343f; background: #24242c; color: #f2f2f5; }
+  button:hover { border-color: #ff5fa2; }
+  button.primary { background: #ff5fa2; color: #141418; border: none; font-weight: 700; width: 100%; margin-top: 10px; padding: 9px; font-size: 13px; }
+  button.danger:hover { border-color: #ff5f7a; color: #ff5f7a; }
+  .newkey { display: none; margin-top: 10px; background: #2a1d29; border: 1px dashed #ff5fa2; border-radius: 8px; padding: 10px; }
+  .newkey .k { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 15px; font-weight: 700; color: #fff; letter-spacing: .5px; margin: 4px 0 8px; word-break: break-all; }
+  .user { border-top: 1px solid #2c2c36; padding: 10px 0; }
+  .user:first-child { border-top: none; padding-top: 0; }
+  .row1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .name { font-weight: 700; font-size: 14px; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 700; }
+  .on { background: #163b26; color: #6fe3a1; }
+  .off { background: #3b1620; color: #ff8a9a; }
+  .key { font-family: ui-monospace, Menlo, Consolas, monospace; color: #c8c8d2; font-size: 12px; margin: 4px 0; cursor: pointer; }
+  .meta { color: #8a8a96; font-size: 11px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .msg { min-height: 16px; font-size: 12px; margin-top: 8px; color: #ffcf7a; }
+  .empty { color: #8a8a96; text-align: center; padding: 10px; }
+  .search { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+  <h1>GlowCam</h1>
+  <div class="sub">Accesos de tus chatters a la extensión</div>
+
+  <div class="card">
+    <label for="name">Nuevo chatter</label>
+    <input id="name" placeholder="Nombre (p. ej. Nicolás)" maxlength="40">
+    <label for="notes">Notas (opcional)</label>
+    <input id="notes" placeholder="Turno, cuentas…" maxlength="80">
+    <button class="primary" id="create">＋ Crear y generar clave</button>
+    <div class="newkey" id="newkey">
+      <div class="meta" id="newkeyFor"></div>
+      <div class="k" id="newkeyVal"></div>
+      <button id="copy">📋 Copiar clave</button>
+    </div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <div class="card">
+    <input class="search" id="search" placeholder="Buscar chatter…">
+    <div id="list"><div class="empty">Cargando…</div></div>
+  </div>
+
+<script>
+  var users = [];
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmtDate(iso) {
+    if (!iso) return 'nunca';
+    var d = new Date(iso);
+    return d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' }) + ' ' +
+           d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  }
+  function say(t, ok) { $('msg').textContent = t || ''; $('msg').style.color = ok ? '#6fe3a1' : '#ffcf7a'; }
+  function busy(on) { document.body.style.opacity = on ? '0.6' : '1'; }
+
+  function run(fn, args, done) {
+    busy(true);
+    var r = google.script.run
+      .withSuccessHandler(function (res) { busy(false); done && done(res); })
+      .withFailureHandler(function (err) { busy(false); say('⚠️ ' + (err && err.message ? err.message : err)); });
+    r[fn].apply(r, args || []);
+  }
+
+  function showKey(user, key, title) {
+    $('newkey').style.display = 'block';
+    $('newkeyFor').textContent = title + ' ' + user + ':';
+    $('newkeyVal').textContent = key;
+  }
+
+  function copy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); say('Copiado ✅', true); } catch (e) { say('Selecciona y copia la clave a mano.'); }
+    ta.remove();
+  }
+
+  function render() {
+    var q = $('search').value.trim().toLowerCase();
+    var list = $('list');
+    list.innerHTML = '';
+    var shown = users.filter(function (u) { return !q || u.user.toLowerCase().indexOf(q) >= 0 || (u.notes || '').toLowerCase().indexOf(q) >= 0; });
+    if (!shown.length) {
+      var e = document.createElement('div'); e.className = 'empty';
+      e.textContent = users.length ? 'Ningún chatter coincide.' : 'Aún no hay chatters. Crea el primero arriba.';
+      list.appendChild(e); return;
+    }
+    shown.forEach(function (u) {
+      var box = document.createElement('div'); box.className = 'user';
+      var r1 = document.createElement('div'); r1.className = 'row1';
+      var n = document.createElement('span'); n.className = 'name'; n.textContent = u.user;
+      var p = document.createElement('span'); p.className = 'pill ' + (u.active ? 'on' : 'off'); p.textContent = u.active ? 'Activo' : 'Desactivado';
+      r1.appendChild(n); r1.appendChild(p);
+      var k = document.createElement('div'); k.className = 'key'; k.textContent = u.key + '  📋'; k.title = 'Copiar clave';
+      k.onclick = function () { copy(u.key); };
+      var m = document.createElement('div'); m.className = 'meta';
+      m.textContent = 'Último uso: ' + fmtDate(u.lastUse) + ' · ' + (u.hasDevice ? 'ordenador vinculado' : 'sin ordenador') + (u.notes ? ' · ' + u.notes : '');
+      var a = document.createElement('div'); a.className = 'actions';
+      a.appendChild(btn(u.active ? '⏸ Desactivar' : '▶ Activar', function () {
+        run('setActive', [u.user, !u.active], function (res) { users = res; render(); say(u.user + (u.active ? ' desactivado. Pierde el acceso en unos minutos.' : ' activado.'), true); });
+      }));
+      a.appendChild(btn('🔑 Cambiar clave', function () {
+        if (!confirm('¿Cambiar la clave de ' + u.user + '? La actual dejará de funcionar.')) return;
+        run('regenerateKey', [u.user], function (res) { showKey(res.user, res.key, 'Nueva clave de'); load(); });
+      }));
+      if (u.hasDevice) a.appendChild(btn('💻 Liberar ordenador', function () {
+        run('resetDevice', [u.user], function (res) { users = res; render(); say(u.user + ' ya puede activar su clave en otro ordenador.', true); });
+      }));
+      var del = btn('🗑 Borrar', function () {
+        if (!confirm('¿Borrar a ' + u.user + '? Perderá el acceso.')) return;
+        run('deleteUser', [u.user], function (res) { users = res; render(); say(u.user + ' borrado.', true); });
+      });
+      del.className = 'danger';
+      a.appendChild(del);
+      box.appendChild(r1); box.appendChild(k); box.appendChild(m); box.appendChild(a);
+      list.appendChild(box);
+    });
+  }
+
+  function btn(text, fn) { var b = document.createElement('button'); b.textContent = text; b.onclick = fn; return b; }
+
+  function load() { run('listUsers', [], function (res) { users = res || []; render(); }); }
+
+  $('create').onclick = function () {
+    var name = $('name').value.trim();
+    if (!name) { say('Escribe un nombre.'); return; }
+    run('createUser', [name, $('notes').value.trim()], function (res) {
+      $('name').value = ''; $('notes').value = '';
+      showKey(res.user, res.key, 'Clave de');
+      say('Chatter creado. Copia la clave y pásasela.', true);
+      load();
+    });
+  };
+  $('name').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('create').click(); });
+  $('copy').onclick = function () { copy($('newkeyVal').textContent); };
+  $('search').addEventListener('input', render);
+  load();
+</script>
+</body>
+</html>
