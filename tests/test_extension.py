@@ -84,6 +84,15 @@ async def main(video_path, shot):
             return {{v: s.getVideoTracks().length, a: s.getAudioTracks().length}};
         }}""")
         check("getUserMedia con GlowCam devuelve vídeo + audio", cam == {"v": 1, "a": 1}, str(cam))
+        ident = await page.evaluate("""() => {
+            const t = window.__s.getVideoTracks()[0]; const c = t.clone();
+            const fake = (navigator.mediaDevices.enumerateDevices + '').includes('native code');
+            return {id: t.getSettings().deviceId, label: t.label, cloneId: c.getSettings().deviceId, cloneLabel: c.label,
+                    capsId: t.getCapabilities().deviceId, w: t.getSettings().width, h: t.getSettings().height, nativeLook: fake};
+        }""")
+        check("La pista dice ser «GlowCam» (Snapchat deja la opción marcada)",
+              ident["id"] == "glowcam-virtual-camera" and ident["label"] == "GlowCam" and ident["cloneId"] == "glowcam-virtual-camera"
+              and ident["cloneLabel"] == "GlowCam" and ident["capsId"] == "glowcam-virtual-camera" and (ident["w"], ident["h"]) == (720, 1280), str(ident))
         await page.wait_for_timeout(1500)
         st1 = await page.evaluate(f"({FRAME_STATS})(window.__s)")
         await page.wait_for_timeout(700)
@@ -99,6 +108,12 @@ async def main(video_path, shot):
             const s = await navigator.mediaDevices.getUserMedia({video: {deviceId: {exact: l[0].deviceId}}});
             const t = s.getVideoTracks()[0]; const r = {label: t.label}; t.stop(); return r;
         }""")
+        realset = await page.evaluate("""async () => {
+            const l = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind==='videoinput' && d.deviceId !== 'glowcam-virtual-camera');
+            const s = await navigator.mediaDevices.getUserMedia({video: {deviceId: {exact: l[0].deviceId}}});
+            const t = s.getVideoTracks()[0]; const ok = t.getSettings().deviceId === l[0].deviceId; t.stop(); return ok;
+        }""")
+        check("Las cámaras reales conservan su propio identificador", realset)
         check("Elegir otra cámara en Snapchat sigue funcionando", "glowcam" not in real["label"].lower() and real["label"] != "", real["label"])
 
         # Formato con bordes
