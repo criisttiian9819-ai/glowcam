@@ -22,6 +22,7 @@ No necesita OBS, ni drivers, ni micrófono virtual. El audio del vídeo va inclu
 4. Arriba a la derecha, activa **«Modo de desarrollador»**.
 5. Pulsa **«Cargar descomprimida»** y elige la carpeta **GlowCam-Extension**.
 6. Cierra y vuelve a abrir Snapchat (la web o la app instalada desde Chrome).
+7. Abre el panel **● GlowCam** y escribe **tu clave** (te la da tu responsable). Solo se pide una vez.
 
 ### Usar
 
@@ -62,6 +63,21 @@ https://github.com/criisttiian9819-ai/glowcam/releases/latest/download/GlowCam-W
 4. Para el modo Vídeo con audio hace falta además VB-CABLE (https://vb-audio.com/Cable); en Snapchat, micrófono «CABLE Output».
 
 (En Mac el programa necesita OBS y no es fiable: usa la extensión.)
+
+---
+
+## 🔑 Claves de acceso (solo Cristian)
+
+Panel: hoja de Google **«GlowCam · Accesos»** → menú **GlowCam → Abrir panel**.
+
+- **＋ Crear y generar clave**: escribe el nombre del chatter; copia la clave y pásasela.
+- **⏸ Desactivar / ▶ Activar**: corta o devuelve el acceso (se aplica en unos minutos o al reabrir Snapchat).
+- **🔑 Cambiar clave**: la clave antigua deja de funcionar al instante.
+- **💻 Liberar ordenador**: cada clave queda atada al primer ordenador donde se activa; pulsa esto si el chatter cambia de ordenador.
+- **🗑 Borrar**.
+- La hoja muestra el **último uso** de cada chatter.
+
+Los chatters meten la clave **una sola vez**. La extensión la comprueba sola al abrir Snapchat y cada 30 minutos; si no hay internet sigue funcionando hasta 12 horas.
 
 ---
 
