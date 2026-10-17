@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "GlowCam para Snapchat",
+  "version": "1.0.0",
+  "description": "Usa tu cámara en formato vertical o un vídeo con su audio en las videollamadas de Snapchat web.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "GlowCam para Snapchat",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.snapchat.com/*"],
+      "js": ["glowcam.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ]
+}

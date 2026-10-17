@@ -1,0 +1,725 @@
+/*
+ * GlowCam para Snapchat — se ejecuta dentro de la página de Snapchat web.
+ *
+ * Añade una cámara «GlowCam» a la lista de cámaras del navegador. Cuando
+ * Snapchat la usa, recibe un lienzo de 720×1280 (vertical) que se dibuja con:
+ *   - tu cámara real, recortada a 9:16 con zoom/encuadre, o
+ *   - un vídeo guardado, con su audio enviado como micrófono.
+ */
+(() => {
+  "use strict";
+  if (window.__glowcamLoaded) return;
+  window.__glowcamLoaded = true;
+  if (!window.MediaDevices || !navigator.mediaDevices) return;
+
+  const VERSION = "1.0.0";
+  const DEVICE_ID = "glowcam-virtual-camera";
+  const DEVICE_LABEL = "GlowCam";
+  const FPS = 30;
+  const FORMATS = [
+    { name: "Vertical 9:16 (Snapchat)", w: 720, h: 1280, pillarbox: false },
+    { name: "Vertical con bordes (16:9)", w: 1280, h: 720, pillarbox: true },
+    { name: "Horizontal 16:9", w: 1280, h: 720, pillarbox: false },
+  ];
+
+  const origGUM = MediaDevices.prototype.getUserMedia;
+  const origEnum = MediaDevices.prototype.enumerateDevices;
+  const isTop = window.top === window;
+
+  // ------------------------------------------------------------------
+  // Ajustes (guardados en el navegador, por usuario)
+  // ------------------------------------------------------------------
+  const store = {
+    get(k, d) {
+      try {
+        const v = localStorage.getItem("glowcam:" + k);
+        return v === null ? d : JSON.parse(v);
+      } catch (_) { return d; }
+    },
+    set(k, v) {
+      try { localStorage.setItem("glowcam:" + k, JSON.stringify(v)); } catch (_) { /* sin almacenamiento */ }
+    },
+  };
+
+  const S = {
+    enabled: store.get("enabled", true),
+    source: store.get("source", "camera"), // "camera" | "video"
+    camId: store.get("camId", ""),
+    format: store.get("format", 0),
+    zoom: store.get("zoom", 1),
+    offX: store.get("offX", 0),
+    offY: store.get("offY", 0),
+    mirror: store.get("mirror", false),
+    loop: store.get("loop", true),
+    monitor: store.get("monitor", false),
+    mixMic: store.get("mixMic", false),
+    videoId: store.get("videoId", null),
+  };
+  const save = (k) => store.set(k, S[k]);
+
+  // ------------------------------------------------------------------
+  // Lienzo de salida
+  // ------------------------------------------------------------------
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  let outStream = null;
+
+  function applySize() {
+    const f = FORMATS[S.format] || FORMATS[0];
+    if (canvas.width !== f.w || canvas.height !== f.h) {
+      canvas.width = f.w;
+      canvas.height = f.h;
+    }
+  }
+  applySize();
+
+  function getOutStream() {
+    startTicker();
+    if (!outStream || outStream.getVideoTracks().every((t) => t.readyState === "ended")) {
+      outStream = canvas.captureStream(FPS);
+    }
+    return outStream;
+  }
+
+  // Recorte con proporción `aspect`, zoom >= 1, desplazamientos -1..1
+  function computeCrop(sw, sh, aspect, zoom, offX, offY) {
+    zoom = Math.max(1, zoom || 1);
+    let cw, ch;
+    if (sw / sh > aspect) { ch = sh / zoom; cw = ch * aspect; }
+    else { cw = sw / zoom; ch = cw / aspect; }
+    cw = Math.max(2, Math.min(sw, cw));
+    ch = Math.max(2, Math.min(sh, ch));
+    const ox = Math.max(-1, Math.min(1, offX || 0));
+    const oy = Math.max(-1, Math.min(1, offY || 0));
+    const x = Math.max(0, Math.min(sw - cw, ((sw - cw) / 2) * (1 + ox)));
+    const y = Math.max(0, Math.min(sh - ch, ((sh - ch) / 2) * (1 + oy)));
+    return { x, y, w: cw, h: ch };
+  }
+  window.__glowcamComputeCrop = computeCrop; // para pruebas
+
+  function drawSource(el, sw, sh, dx, dy, dw, dh, zoom, offX, offY) {
+    const c = computeCrop(sw, sh, dw / dh, zoom, offX, offY);
+    ctx.save();
+    if (S.mirror) {
+      ctx.translate(dx + dw, dy);
+      ctx.scale(-1, 1);
+      ctx.drawImage(el, c.x, c.y, c.w, c.h, 0, 0, dw, dh);
+    } else {
+      ctx.drawImage(el, c.x, c.y, c.w, c.h, dx, dy, dw, dh);
+    }
+    ctx.restore();
+  }
+
+  function drawPlaceholder(text) {
+    const { width: W, height: H } = canvas;
+    const g = ctx.createLinearGradient(0, 0, W, H);
+    g.addColorStop(0, "#2a1d3d");
+    g.addColorStop(1, "#5a2442");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.textAlign = "center";
+    ctx.font = `600 ${Math.round(Math.min(W, H) / 14)}px system-ui, sans-serif`;
+    ctx.fillText(text, W / 2, H / 2);
+  }
+
+  function currentElement() {
+    const el = S.source === "video" ? videoEl : camEl;
+    if (el && el.readyState >= 2 && el.videoWidth > 0) return el;
+    return null;
+  }
+
+  function render() {
+    applySize();
+    const f = FORMATS[S.format] || FORMATS[0];
+    const W = canvas.width, H = canvas.height;
+    const el = currentElement();
+    if (!el) {
+      drawPlaceholder(S.source === "video" ? "Elige un vídeo" : "Cargando cámara…");
+      return;
+    }
+    const sw = el.videoWidth, sh = el.videoHeight;
+    if (!f.pillarbox) {
+      drawSource(el, sw, sh, 0, 0, W, H, S.zoom, S.offX, S.offY);
+      return;
+    }
+    // Vertical centrado sobre fondo desenfocado
+    ctx.save();
+    ctx.filter = "blur(28px) brightness(0.45)";
+    drawSource(el, sw, sh, -40, -40, W + 80, H + 80, 1, 0, 0);
+    ctx.restore();
+    const iw = Math.round((H * 9) / 16);
+    drawSource(el, sw, sh, Math.round((W - iw) / 2), 0, iw, H, S.zoom, S.offX, S.offY);
+  }
+
+  // Reloj de dibujo: un Worker no se ralentiza tanto en segundo plano; si la
+  // página no lo permite, se usa un temporizador normal.
+  let tickerStarted = false;
+  function startTicker() {
+    if (tickerStarted) return;
+    tickerStarted = true;
+    let ticking = false;
+    const tick = () => {
+      if (ticking) return;
+      ticking = true;
+      try { render(); } catch (e) { /* fotograma perdido */ }
+      ticking = false;
+    };
+    try {
+      const src = `setInterval(()=>postMessage(0), ${Math.round(1000 / FPS)});`;
+      const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+      const w = new Worker(url);
+      w.onmessage = tick;
+      w.onerror = () => { w.terminate(); setInterval(tick, 1000 / FPS); };
+    } catch (_) {
+      setInterval(tick, 1000 / FPS);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Fuente: cámara real
+  // ------------------------------------------------------------------
+  const camEl = document.createElement("video");
+  camEl.muted = true;
+  camEl.playsInline = true;
+  let camStream = null;
+  let camStarting = null;
+
+  async function startCamera() {
+    if (camStream && camStream.getVideoTracks().some((t) => t.readyState === "live")) return;
+    if (camStarting) return camStarting;
+    camStarting = (async () => {
+      const video = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+      if (S.camId) video.deviceId = { exact: S.camId };
+      try {
+        camStream = await origGUM.call(navigator.mediaDevices, { video });
+      } catch (e) {
+        if (!S.camId) throw e;
+        S.camId = ""; save("camId"); // la cámara guardada ya no existe
+        delete video.deviceId;
+        camStream = await origGUM.call(navigator.mediaDevices, { video });
+      }
+      camEl.srcObject = camStream;
+      await camEl.play().catch(() => {});
+      ui.refreshCameras();
+    })();
+    try { await camStarting; } finally { camStarting = null; }
+  }
+
+  function stopCamera() {
+    if (camStream) camStream.getTracks().forEach((t) => t.stop());
+    camStream = null;
+    camEl.srcObject = null;
+  }
+
+  // ------------------------------------------------------------------
+  // Fuente: vídeo (guardado en IndexedDB de esta web)
+  // ------------------------------------------------------------------
+  const videoEl = document.createElement("video");
+  videoEl.playsInline = true;
+  videoEl.loop = S.loop;
+  videoEl.crossOrigin = "anonymous";
+  let videoUrl = null;
+  // Forzar que se pinte el primer fotograma aunque el vídeo esté en pausa
+  videoEl.addEventListener("loadeddata", () => {
+    if (videoEl.paused && videoEl.currentTime === 0) videoEl.currentTime = 0.001;
+  });
+
+  const db = {
+    _p: null,
+    open() {
+      if (this._p) return this._p;
+      this._p = new Promise((res, rej) => {
+        const r = indexedDB.open("glowcam", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("videos", { keyPath: "id" });
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+      return this._p;
+    },
+    async tx(mode, fn) {
+      const d = await this.open();
+      return new Promise((res, rej) => {
+        const t = d.transaction("videos", mode);
+        const out = fn(t.objectStore("videos"));
+        t.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+        t.onerror = () => rej(t.error);
+      });
+    },
+    list() { return this.tx("readonly", (s) => s.getAll()); },
+    get(id) { return this.tx("readonly", (s) => s.get(id)); },
+    put(v) { return this.tx("readwrite", (s) => s.put(v)); },
+    del(id) { return this.tx("readwrite", (s) => s.delete(id)); },
+  };
+
+  async function addVideos(files) {
+    let last = null;
+    for (const f of files) {
+      if (!f.type.startsWith("video/") && !/\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name)) continue;
+      const v = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: f.name, blob: f, added: Date.now() };
+      await db.put(v);
+      last = v;
+    }
+    if (last) await selectVideo(last.id, true);
+    await ui.refreshVideos();
+  }
+
+  async function selectVideo(id, autoplay) {
+    const v = id ? await db.get(id) : null;
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    videoUrl = null;
+    S.videoId = v ? v.id : null;
+    save("videoId");
+    if (!v) { videoEl.removeAttribute("src"); videoEl.load(); return; }
+    videoUrl = URL.createObjectURL(v.blob);
+    videoEl.src = videoUrl;
+    audio.connectVideo();
+    if (autoplay) { await audio.resume(); await videoEl.play().catch(() => {}); }
+    ui.setStatus("Vídeo: " + v.name);
+  }
+
+  // ------------------------------------------------------------------
+  // Audio: el vídeo (y opcionalmente tu micro) se mezcla en un micrófono
+  // ------------------------------------------------------------------
+  const audio = {
+    ac: null, dest: null, videoGain: null, monitorGain: null, micGain: null,
+    videoNode: null, micStream: null, micNode: null,
+    init() {
+      if (this.ac) return;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ac = new AC();
+      this.dest = this.ac.createMediaStreamDestination();
+      this.videoGain = this.ac.createGain();
+      this.monitorGain = this.ac.createGain();
+      this.micGain = this.ac.createGain();
+      this.videoGain.connect(this.dest);
+      this.monitorGain.connect(this.ac.destination);
+      this.micGain.connect(this.dest);
+      this.update();
+    },
+    async resume() {
+      this.init();
+      if (this.ac.state !== "running") { try { await this.ac.resume(); } catch (_) { /* necesita un clic */ } }
+      ui.updateAudioWarning();
+    },
+    connectVideo() {
+      this.init();
+      if (this.videoNode) return;
+      this.videoNode = this.ac.createMediaElementSource(videoEl);
+      this.videoNode.connect(this.videoGain);
+      this.videoNode.connect(this.monitorGain);
+    },
+    async ensureMic(audioConstraints) {
+      this.init();
+      if (this.micStream && this.micStream.getAudioTracks().some((t) => t.readyState === "live")) return;
+      const c = audioConstraints && typeof audioConstraints === "object" ? audioConstraints : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+      this.micStream = await origGUM.call(navigator.mediaDevices, { audio: c });
+      if (this.micNode) this.micNode.disconnect();
+      this.micNode = this.ac.createMediaStreamSource(this.micStream);
+      this.micNode.connect(this.micGain);
+    },
+    update() {
+      if (!this.ac) return;
+      const video = S.source === "video";
+      const t = this.ac.currentTime;
+      this.videoGain.gain.setTargetAtTime(video ? 1 : 0, t, 0.02);
+      this.monitorGain.gain.setTargetAtTime(video && S.monitor ? 1 : 0, t, 0.02);
+      this.micGain.gain.setTargetAtTime(!video || S.mixMic ? 1 : 0, t, 0.02);
+    },
+    track() {
+      this.init();
+      return this.dest.stream.getAudioTracks()[0];
+    },
+  };
+
+  // ------------------------------------------------------------------
+  // Sustituir la cámara para Snapchat
+  // ------------------------------------------------------------------
+  function wantsGlowCam(video) {
+    if (!S.enabled || !video) return false;
+    if (video === true) return true;
+    const d = video.deviceId;
+    if (!d) return true; // cámara por defecto → GlowCam
+    const ids = [].concat(typeof d === "object" ? (d.exact || d.ideal || []) : d);
+    if (ids.length === 0) return true;
+    return ids.includes(DEVICE_ID);
+  }
+
+  async function prepareSource() {
+    if (S.source === "camera") {
+      await startCamera();
+    } else {
+      stopCamera();
+      if (!videoEl.src && S.videoId) await selectVideo(S.videoId, false);
+      audio.connectVideo();
+      await audio.resume();
+      if (videoEl.src && videoEl.paused) await videoEl.play().catch(() => {});
+    }
+  }
+
+  async function mixedAudioTrack(audioConstraints) {
+    await audio.resume();
+    try { await audio.ensureMic(audioConstraints); } catch (e) { if (S.source !== "video") throw e; }
+    audio.update();
+    return audio.track().clone();
+  }
+
+  async function glowGetUserMedia(constraints) {
+    const c = constraints || {};
+    // Petición solo de micrófono: con GlowCam activado se entrega la mezcla
+    // (micro en modo cámara; audio del vídeo en modo vídeo).
+    if (!c.video && c.audio && S.enabled) {
+      return new MediaStream([await mixedAudioTrack(c.audio)]);
+    }
+    if (!wantsGlowCam(c.video)) return origGUM.call(this, constraints);
+
+    const tracks = [];
+    await prepareSource().catch((e) => ui.setStatus("Cámara: " + (e && e.message ? e.message : e)));
+    const vt = getOutStream().getVideoTracks()[0].clone();
+    tracks.push(vt);
+    if (c.audio) tracks.push(await mixedAudioTrack(c.audio));
+    ui.setStatus("🔴 Snapchat está usando GlowCam");
+    ui.setLive(true);
+    handedOut.push(vt);
+    return new MediaStream(tracks);
+  }
+
+  // Cuando Snapchat cuelga, apagar la cámara real si el panel está cerrado
+  const handedOut = [];
+  setInterval(() => {
+    for (let i = handedOut.length - 1; i >= 0; i--) if (handedOut[i].readyState === "ended") handedOut.splice(i, 1);
+    if (handedOut.length === 0 && ui.els.pill && ui.els.pill.classList.contains("live")) {
+      ui.setLive(false);
+      ui.setStatus("Llamada terminada.");
+      if (!ui.els.panel.classList.contains("open")) { stopCamera(); videoEl.pause(); }
+    }
+  }, 2000);
+
+  async function glowEnumerateDevices() {
+    const list = await origEnum.call(this);
+    if (!S.enabled) return list;
+    const fake = {
+      deviceId: DEVICE_ID,
+      groupId: "glowcam",
+      kind: "videoinput",
+      label: DEVICE_LABEL,
+      getCapabilities() {
+        return { deviceId: DEVICE_ID, groupId: "glowcam", width: { min: 1, max: 1920 }, height: { min: 1, max: 1920 }, frameRate: { min: 1, max: FPS }, facingMode: ["user"] };
+      },
+      toJSON() { return { deviceId: DEVICE_ID, groupId: "glowcam", kind: "videoinput", label: DEVICE_LABEL }; },
+    };
+    try { Object.setPrototypeOf(fake, (window.InputDeviceInfo || window.MediaDeviceInfo).prototype); } catch (_) { /* objeto simple */ }
+    // GlowCam primero para que sea la cámara por defecto
+    return [fake, ...list.filter((d) => d.deviceId !== DEVICE_ID)];
+  }
+
+  function patch(name, fn) {
+    const wrapped = {
+      [name](...args) { return fn.apply(this, args); },
+    }[name];
+    Object.defineProperty(wrapped, "toString", { value: () => `function ${name}() { [native code] }` });
+    Object.defineProperty(MediaDevices.prototype, name, { value: wrapped, writable: true, configurable: true });
+  }
+  patch("getUserMedia", glowGetUserMedia);
+  patch("enumerateDevices", glowEnumerateDevices);
+
+  // ------------------------------------------------------------------
+  // Panel flotante (solo en la ventana principal)
+  // ------------------------------------------------------------------
+  const ui = {
+    root: null, els: {},
+    setStatus(t) { if (this.els.status) this.els.status.textContent = t; },
+    setLive(on) { if (this.els.pill) this.els.pill.classList.toggle("live", !!on); },
+    updateAudioWarning() {
+      if (!this.els.audioWarn) return;
+      const bad = S.source === "video" && audio.ac && audio.ac.state !== "running";
+      this.els.audioWarn.style.display = bad ? "block" : "none";
+    },
+    async refreshCameras() {
+      const sel = this.els.camSel;
+      if (!sel) return;
+      let devs = [];
+      try { devs = (await origEnum.call(navigator.mediaDevices)).filter((d) => d.kind === "videoinput"); } catch (_) { /* nada */ }
+      const current = S.camId || (camStream && camStream.getVideoTracks()[0] && camStream.getVideoTracks()[0].getSettings().deviceId) || "";
+      sel.replaceChildren(...devs.map((d, i) => {
+        const o = document.createElement("option");
+        o.value = d.deviceId;
+        o.textContent = d.label || `Cámara ${i + 1}`;
+        if (d.deviceId === current) o.selected = true;
+        return o;
+      }));
+      if (!devs.length) {
+        const o = document.createElement("option");
+        o.textContent = "Pulsa «Cámara» para dar permiso";
+        sel.replaceChildren(o);
+      }
+    },
+    async refreshVideos() {
+      const box = this.els.videoList;
+      if (!box) return;
+      let vids = [];
+      try { vids = (await db.list()).sort((a, b) => b.added - a.added); } catch (_) { /* nada */ }
+      if (!vids.length) {
+        box.replaceChildren(h("div", { class: "empty" }, "Aún no hay vídeos. Añade uno 👇"));
+        return;
+      }
+      box.replaceChildren(...vids.map((v) => {
+        const row = h("div", { class: "vid" + (v.id === S.videoId ? " sel" : "") },
+          h("span", { class: "vname", title: v.name, onclick: () => selectVideo(v.id, true).then(() => this.refreshVideos()) },
+            (v.id === S.videoId ? "▶ " : "") + v.name),
+          h("button", { class: "del", title: "Quitar de la lista", onclick: async () => {
+            await db.del(v.id);
+            if (S.videoId === v.id) await selectVideo(null);
+            this.refreshVideos();
+          } }, "✕"));
+        return row;
+      }));
+    },
+  };
+
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+      else if (k === "class") el.className = v;
+      else if (v === true) el.setAttribute(k, "");
+      else if (v !== false && v != null) el.setAttribute(k, v);
+    }
+    for (const kid of kids.flat()) {
+      if (kid == null || kid === false) continue;
+      el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    }
+    return el;
+  }
+
+  const CSS = `
+  :host { all: initial; }
+  * { box-sizing: border-box; font-family: -apple-system, system-ui, "Segoe UI", sans-serif; }
+  .pill { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; background: #ff5fa2; color: #141418;
+    border: none; border-radius: 999px; padding: 9px 14px; font-weight: 700; font-size: 13px; cursor: pointer;
+    box-shadow: 0 6px 20px rgba(0,0,0,.35); display: flex; align-items: center; gap: 7px; }
+  .pill .dot { width: 9px; height: 9px; border-radius: 50%; background: #141418; opacity: .45; }
+  .pill.live .dot { background: #e8102e; opacity: 1; box-shadow: 0 0 0 3px rgba(232,16,46,.25); }
+  .pill.off { background: #3a3a45; color: #ddd; }
+  .panel { position: fixed; right: 16px; bottom: 64px; z-index: 2147483647; width: 320px; max-height: calc(100vh - 90px);
+    overflow: auto; background: #141418; color: #f2f2f5; border: 1px solid #2c2c36; border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5); padding: 14px; font-size: 13px; display: none; }
+  .panel.open { display: block; }
+  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .title { font-size: 17px; font-weight: 800; color: #ff5fa2; }
+  .switch { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; color: #c8c8d2; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #34343f; border-radius: 9px; overflow: hidden; margin-bottom: 10px; }
+  .seg button { background: #24242c; color: #f2f2f5; border: none; padding: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  .seg button.on { background: #ff5fa2; color: #141418; }
+  .preview { display: flex; justify-content: center; margin-bottom: 10px; }
+  .preview canvas { width: 120px; height: auto; max-height: 213px; object-fit: contain; border-radius: 10px; background: #000; border: 1px solid #2c2c36; }
+  label.row { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 8px; margin: 6px 0; color: #c8c8d2; }
+  select, input[type=range] { width: 100%; }
+  select { background: #24242c; color: #f2f2f5; border: 1px solid #34343f; border-radius: 8px; padding: 6px; font-size: 12px; }
+  input[type=range] { accent-color: #ff5fa2; }
+  .checks { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0; color: #c8c8d2; font-size: 12px; }
+  .checks label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
+  input[type=checkbox] { accent-color: #ff5fa2; }
+  .btn { background: #24242c; color: #f2f2f5; border: 1px solid #34343f; border-radius: 8px; padding: 7px 10px; cursor: pointer; font-size: 12px; }
+  .btn:hover { border-color: #ff5fa2; }
+  .btn.primary { background: #ff5fa2; color: #141418; border: none; font-weight: 700; }
+  .videos { border: 1px solid #2c2c36; border-radius: 9px; max-height: 150px; overflow: auto; margin-bottom: 8px; }
+  .vid { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #22222a; }
+  .vid:last-child { border-bottom: none; }
+  .vid.sel { background: #2a1d29; }
+  .vname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .vid.sel .vname { color: #ff8cc0; font-weight: 600; }
+  .del { background: none; border: none; color: #888; cursor: pointer; font-size: 12px; }
+  .del:hover { color: #ff5f7a; }
+  .empty { padding: 10px; color: #8a8a96; font-size: 12px; text-align: center; }
+  .player { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .player input { flex: 1; }
+  .time { color: #a0a0ad; font-size: 11px; min-width: 70px; text-align: right; font-variant-numeric: tabular-nums; }
+  .status { margin-top: 10px; color: #c8c8d2; font-size: 12px; }
+  .hint { margin-top: 6px; color: #8a8a96; font-size: 11px; line-height: 1.4; }
+  .warn { display: none; margin: 6px 0; padding: 7px 9px; background: #3a2a10; color: #ffcf7a; border-radius: 8px; font-size: 12px; cursor: pointer; }
+  .hidden { display: none !important; }
+  `;
+
+  function fmtTime(s) {
+    if (!isFinite(s)) return "0:00";
+    s = Math.max(0, Math.floor(s));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  function buildUI() {
+    const host = document.createElement("div");
+    host.id = "glowcam-root";
+    const shadow = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = CSS;
+    shadow.append(style);
+    const E = ui.els;
+
+    const set = (k, v) => { S[k] = v; save(k); };
+
+    E.pill = h("button", { class: "pill" + (S.enabled ? "" : " off"), title: "GlowCam", onclick: () => {
+      E.panel.classList.toggle("open");
+      if (E.panel.classList.contains("open")) {
+        ui.refreshVideos();
+        if (S.source === "camera") startCamera().catch((e) => ui.setStatus("Cámara: " + e.message));
+        else ui.refreshCameras();
+      } else if (!E.pill.classList.contains("live")) {
+        stopCamera(); // panel cerrado y Snapchat no la usa: apagar la cámara
+      }
+    } }, h("span", { class: "dot" }), "GlowCam");
+
+    E.enabled = h("input", { type: "checkbox", onchange: (e) => {
+      set("enabled", e.target.checked);
+      E.pill.classList.toggle("off", !S.enabled);
+      ui.setStatus(S.enabled ? "GlowCam activado. En Snapchat elige la cámara «GlowCam»." : "GlowCam desactivado: Snapchat usará tu cámara normal.");
+    } });
+    E.enabled.checked = S.enabled;
+
+    const segCam = h("button", { onclick: () => setSource("camera") }, "📷 Cámara");
+    const segVid = h("button", { onclick: () => setSource("video") }, "🎬 Vídeo");
+
+    // Cámara
+    E.camSel = h("select", { onchange: async (e) => {
+      set("camId", e.target.value);
+      stopCamera();
+      if (S.source === "camera") await startCamera().catch((err) => ui.setStatus("Cámara: " + err.message));
+    } });
+    const camBox = h("div", {}, h("label", { class: "row" }, "Cámara", E.camSel));
+
+    // Vídeo
+    E.videoList = h("div", { class: "videos" });
+    E.file = h("input", { type: "file", accept: "video/*", multiple: true, class: "hidden", onchange: async (e) => {
+      const input = e.currentTarget || E.file;
+      const files = [...input.files];
+      await audio.resume();
+      await addVideos(files);
+      input.value = "";
+    } });
+    E.play = h("button", { class: "btn", onclick: async () => {
+      await audio.resume();
+      if (!videoEl.src) { E.file.click(); return; }
+      if (videoEl.paused) await videoEl.play().catch(() => {}); else videoEl.pause();
+    } }, "▶");
+    E.seek = h("input", { type: "range", min: 0, max: 1000, value: 0, oninput: (e) => {
+      if (isFinite(videoEl.duration)) videoEl.currentTime = (e.target.value / 1000) * videoEl.duration;
+    } });
+    E.time = h("span", { class: "time" }, "0:00 / 0:00");
+    E.loop = h("input", { type: "checkbox", onchange: (e) => { set("loop", e.target.checked); videoEl.loop = S.loop; } });
+    E.loop.checked = S.loop;
+    E.monitor = h("input", { type: "checkbox", onchange: (e) => { set("monitor", e.target.checked); audio.update(); } });
+    E.monitor.checked = S.monitor;
+    E.mixMic = h("input", { type: "checkbox", onchange: async (e) => {
+      set("mixMic", e.target.checked);
+      if (S.mixMic) { await audio.resume(); await audio.ensureMic().catch(() => {}); }
+      audio.update();
+    } });
+    E.mixMic.checked = S.mixMic;
+    E.audioWarn = h("div", { class: "warn", onclick: () => audio.resume() }, "🔇 Pulsa aquí para activar el sonido del vídeo");
+    const vidBox = h("div", {},
+      E.videoList,
+      h("button", { class: "btn primary", onclick: () => E.file.click() }, "＋ Añadir vídeo"),
+      E.file,
+      h("div", { class: "player" }, E.play, E.seek, E.time),
+      h("div", { class: "checks" },
+        h("label", {}, E.loop, "Repetir en bucle"),
+        h("label", {}, E.monitor, "Escucharlo yo"),
+        h("label", {}, E.mixMic, "Mezclar mi micro")),
+      E.audioWarn);
+
+    videoEl.addEventListener("play", () => { E.play.textContent = "⏸"; });
+    videoEl.addEventListener("pause", () => { E.play.textContent = "▶"; });
+    videoEl.addEventListener("timeupdate", () => {
+      if (isFinite(videoEl.duration) && videoEl.duration > 0) {
+        E.seek.value = Math.round((videoEl.currentTime / videoEl.duration) * 1000);
+      }
+      E.time.textContent = `${fmtTime(videoEl.currentTime)} / ${fmtTime(videoEl.duration)}`;
+    });
+
+    // Imagen
+    E.format = h("select", { onchange: (e) => { set("format", +e.target.value); } },
+      ...FORMATS.map((f, i) => h("option", { value: i, selected: i === S.format }, f.name)));
+    const slider = (key, min, max, step) => {
+      const r = h("input", { type: "range", min, max, step, value: S[key], oninput: (e) => set(key, +e.target.value) });
+      return r;
+    };
+    E.zoom = slider("zoom", 1, 3, 0.01);
+    E.offX = slider("offX", -1, 1, 0.01);
+    E.offY = slider("offY", -1, 1, 0.01);
+    E.mirror = h("input", { type: "checkbox", onchange: (e) => set("mirror", e.target.checked) });
+    E.mirror.checked = S.mirror;
+
+    E.status = h("div", { class: "status" }, S.enabled ? "Listo. En Snapchat elige la cámara «GlowCam»." : "GlowCam desactivado.");
+
+    const previewCanvas = canvas;
+    E.panel = h("div", { class: "panel" },
+      h("div", { class: "head" }, h("span", { class: "title" }, "GlowCam"),
+        h("label", { class: "switch" }, E.enabled, "Activado")),
+      h("div", { class: "seg" }, segCam, segVid),
+      h("div", { class: "preview" }, previewCanvas),
+      camBox, vidBox,
+      h("label", { class: "row" }, "Formato", E.format),
+      h("label", { class: "row" }, "Zoom", E.zoom),
+      h("label", { class: "row" }, "Izq. / Der.", E.offX),
+      h("label", { class: "row" }, "Arriba / Abajo", E.offY),
+      h("div", { class: "checks" },
+        h("label", {}, E.mirror, "Espejo"),
+        h("button", { class: "btn", onclick: () => {
+          ["zoom", "offX", "offY"].forEach((k) => { set(k, k === "zoom" ? 1 : 0); E[k].value = S[k]; });
+        } }, "Centrar")),
+      E.status,
+      h("div", { class: "hint" }, "En la videollamada elige la cámara «GlowCam». Mantén esta ventana visible durante la llamada. v" + VERSION));
+
+    function setSource(src) {
+      set("source", src);
+      segCam.classList.toggle("on", src === "camera");
+      segVid.classList.toggle("on", src === "video");
+      camBox.classList.toggle("hidden", src !== "camera");
+      vidBox.classList.toggle("hidden", src !== "video");
+      audio.update();
+      if (src === "camera") {
+        videoEl.pause();
+        startCamera().catch((e) => ui.setStatus("Cámara: " + e.message));
+      } else {
+        prepareSource().catch(() => {});
+        ui.refreshVideos();
+      }
+      ui.updateAudioWarning();
+    }
+    ui.setSource = setSource;
+    segCam.classList.toggle("on", S.source === "camera");
+    segVid.classList.toggle("on", S.source === "video");
+    camBox.classList.toggle("hidden", S.source !== "camera");
+    vidBox.classList.toggle("hidden", S.source !== "video");
+
+    // Arrastrar vídeos sobre el panel
+    E.panel.addEventListener("dragover", (e) => { e.preventDefault(); });
+    E.panel.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      if (e.dataTransfer && e.dataTransfer.files.length) {
+        await audio.resume();
+        setSource("video");
+        await addVideos([...e.dataTransfer.files]);
+      }
+    });
+
+    shadow.append(E.pill, E.panel);
+    (document.body || document.documentElement).append(host);
+    ui.root = host;
+  }
+
+  if (isTop) {
+    const mount = () => {
+      if (document.getElementById("glowcam-root")) return;
+      buildUI();
+      startTicker();
+      if (S.source === "video" && S.videoId && !videoEl.src) selectVideo(S.videoId, false).catch(() => {});
+    };
+    if (document.body) mount();
+    else document.addEventListener("DOMContentLoaded", mount, { once: true });
+    // Algunas webs rehacen el <body>; volver a montar si desaparece
+    setInterval(() => { if (document.body) mount(); }, 3000);
+  }
+
+  window.__glowcam = { S, FORMATS, canvas, render, selectVideo, addVideos, videoEl, camEl, version: VERSION };
+})();
