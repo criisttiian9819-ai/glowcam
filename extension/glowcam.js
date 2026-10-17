@@ -12,7 +12,7 @@
   window.__glowcamLoaded = true;
   if (!window.MediaDevices || !navigator.mediaDevices) return;
 
-  const VERSION = "1.2.0";
+  const VERSION = "1.3.0";
   const DEVICE_ID = "glowcam-virtual-camera";
   const DEVICE_LABEL = "GlowCam";
   const FPS = 30;
@@ -124,6 +124,15 @@
     }, 300);
   }
   const save = (k) => { store.set(k, S[k]); syncSettings(); };
+
+  // Clave de acceso: la valida la biblioteca (extensión) contra el panel de Cristian.
+  // En la página solo se guarda una caché de arranque; la respuesta real la sustituye.
+  const LIC = { state: "unknown", user: "", until: store.get("licUntil", 0) };
+  function licensed() {
+    if (LIC.state === "ok") return true;
+    if (LIC.state === "unknown") return Date.now() < LIC.until;
+    return false;
+  }
   window.addEventListener("pagehide", () => {
     if (!syncTimer) return;
     clearTimeout(syncTimer);
@@ -230,6 +239,10 @@
     const f = FORMATS[S.format] || FORMATS[0];
     const W = canvas.width, H = canvas.height;
     const live = currentElement();
+    if (!licensed()) {
+      drawPlaceholder("🔒 GlowCam bloqueado");
+      return;
+    }
     if (!live) {
       drawPlaceholder(S.source === "video" ? (libCount ? "Elige un vídeo" : "Añade un vídeo") : "Cargando cámara…");
       return;
@@ -358,6 +371,12 @@
       lib.queue.splice(0).forEach(([q, t]) => lib.send(q, t));
     } else if (m.type === "height") {
       lib.frame.style.height = Math.min(Math.max(m.h, 60), 320) + "px";
+    } else if (m.type === "license") {
+      LIC.state = m.state;
+      LIC.user = m.user || "";
+      if (m.state === "ok") { LIC.until = m.until || Date.now(); store.set("licUntil", LIC.until); }
+      else if (m.state === "denied" || m.state === "need") { LIC.until = 0; store.set("licUntil", 0); }
+      ui.updateLicense(m);
     } else if (m.type === "settings") {
       const d = m.data || {};
       for (const k of SYNC_KEYS) if (k in d && d[k] !== undefined) { S[k] = d[k]; store.set(k, d[k]); }
@@ -489,6 +508,7 @@
     const c = constraints || {};
     // Petición solo de micrófono: con GlowCam activado se entrega la mezcla
     // (micro en modo cámara; audio del vídeo en modo vídeo).
+    if (!licensed()) return origGUM.call(this, constraints);
     if (!c.video && c.audio && S.enabled) {
       return new MediaStream([await mixedAudioTrack(c.audio)]);
     }
@@ -623,7 +643,7 @@
 
   async function glowEnumerateDevices() {
     const list = await origEnum.call(this);
-    if (!S.enabled) return list;
+    if (!S.enabled || !licensed()) return list;
     const fake = {
       deviceId: DEVICE_ID,
       groupId: "glowcam",
@@ -681,6 +701,32 @@
       }
     },
     refreshVideos() { lib.send({ type: "refresh" }); },
+    updateLicense(m) {
+      const E = this.els;
+      if (!E.lock) return;
+      const ok = licensed();
+      E.lock.classList.toggle("hidden", ok);
+      E.panel.classList.toggle("locked", !ok);
+      E.pill.classList.toggle("locked", !ok);
+      E.pillText.textContent = ok ? "GlowCam" : "GlowCam 🔒";
+      if (ok) {
+        if (m && m.attempt !== undefined) E.keyInput.value = "";
+        E.who.textContent = LIC.user ? "👤 " + LIC.user + (m && m.offline ? " · sin conexión" : "") : "";
+        return;
+      }
+      const msgs = {
+        invalid: "❌ Clave incorrecta. Revísala o pide una nueva a tu responsable.",
+        disabled: "⛔ Tu acceso está desactivado. Habla con tu responsable.",
+        device: "💻 Esta clave ya está activada en otro ordenador. Pide a tu responsable que la libere.",
+        network: "📶 No se pudo comprobar la clave. Revisa tu conexión a internet.",
+      };
+      let t = "";
+      if (m && m.state === "denied") t = msgs[m.reason] || msgs.invalid;
+      else if (m && m.state === "error") t = msgs.network;
+      E.lockMsg.textContent = t;
+      E.activate.disabled = false;
+      E.activate.textContent = "Activar";
+    },
     syncControls() {
       const E = this.els;
       if (!E.panel) return;
@@ -732,6 +778,16 @@
     overflow: auto; background: #141418; color: #f2f2f5; border: 1px solid #2c2c36; border-radius: 14px;
     box-shadow: 0 12px 40px rgba(0,0,0,.5); padding: 14px; font-size: 13px; display: none; }
   .panel.open { display: block; }
+  .panel.locked > :not(.lock) { display: none !important; }
+  .lock { padding: 8px 4px; display: flex; flex-direction: column; gap: 12px; }
+  .lock .title { font-size: 20px; }
+  .locktxt { color: #c8c8d2; font-size: 13px; line-height: 1.45; }
+  .keyinput { width: 100%; background: #24242c; color: #fff; border: 1px solid #34343f; border-radius: 9px; padding: 11px; font: 600 15px ui-monospace, Menlo, Consolas, monospace; letter-spacing: .5px; text-transform: uppercase; }
+  .keyinput:focus { outline: none; border-color: #ff5fa2; }
+  .lock .btn.primary { padding: 11px; font-size: 14px; }
+  .lockmsg { color: #ffcf7a; font-size: 12px; line-height: 1.45; min-height: 18px; }
+  .who { margin-top: 4px; color: #8a8a96; font-size: 11px; }
+  .pill.locked { background: #3a3a45; color: #ddd; }
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
   .title { font-size: 17px; font-weight: 800; color: #ff5fa2; }
   .switch { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; color: #c8c8d2; }
@@ -795,7 +851,7 @@
       } else if (!E.pill.classList.contains("live")) {
         stopCamera(); // panel cerrado y Snapchat no la usa: apagar la cámara
       }
-    } }, h("span", { class: "dot" }), "GlowCam");
+    } }, h("span", { class: "dot" }), (E.pillText = h("span", {}, licensed() ? "GlowCam" : "GlowCam 🔒")));
 
     E.enabled = h("input", { type: "checkbox", onchange: (e) => {
       set("enabled", e.target.checked);
@@ -882,9 +938,31 @@
     E.mirror.checked = S.mirror;
 
     E.status = h("div", { class: "status" }, S.enabled ? "Listo. En Snapchat elige la cámara «GlowCam»." : "GlowCam desactivado.");
+    E.who = h("div", { class: "who" }, "");
+
+    // Pantalla de clave
+    E.keyInput = h("input", { type: "text", class: "keyinput", placeholder: "GLOW-XXXX-XXXX-XXXX", autocomplete: "off", spellcheck: "false", maxlength: "24" });
+    E.lockMsg = h("div", { class: "lockmsg" }, "");
+    const doActivate = () => {
+      const key = E.keyInput.value.trim().toUpperCase();
+      if (!/^GLOW-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) {
+        E.lockMsg.textContent = "Escribe la clave completa, con este formato: GLOW-XXXX-XXXX-XXXX";
+        return;
+      }
+      E.activate.disabled = true;
+      E.activate.textContent = "Comprobando…";
+      E.lockMsg.textContent = "";
+      lib.send({ type: "activate", key });
+    };
+    E.keyInput.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") doActivate(); });
+    E.activate = h("button", { class: "btn primary", onclick: doActivate }, "Activar");
+    E.lock = h("div", { class: "lock" + (licensed() ? " hidden" : "") },
+      h("div", { class: "title" }, "GlowCam"),
+      h("div", { class: "locktxt" }, "Introduce la clave que te ha dado tu responsable. Solo tendrás que hacerlo una vez."),
+      E.keyInput, E.activate, E.lockMsg);
 
     const previewCanvas = canvas;
-    E.panel = h("div", { class: "panel" },
+    E.panel = h("div", { class: "panel" + (licensed() ? "" : " locked") }, E.lock,
       h("div", { class: "head" }, h("span", { class: "title" }, "GlowCam"),
         h("label", { class: "switch" }, E.enabled, "Activado")),
       h("div", { class: "seg" }, segCam, segVid),
@@ -901,7 +979,7 @@
         h("button", { class: "btn", onclick: () => {
           ["zoom", "offX", "offY"].forEach((k) => { set(k, k === "zoom" ? 1 : 0); E[k].value = S[k]; });
         } }, "Centrar")),
-      E.status,
+      E.status, E.who,
       h("div", { class: "hint" }, "En la videollamada elige la cámara «GlowCam». Mantén esta ventana visible durante la llamada. v" + VERSION));
 
     function rotate() {

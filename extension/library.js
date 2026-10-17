@@ -11,6 +11,57 @@
 (() => {
   "use strict";
   const ALLOWED_PARENT = /^https:\/\/([a-z0-9-]+\.)*snapchat\.com$/i;
+
+  // ---------------- clave de acceso ----------------
+  // URL de la aplicación web de Google Apps Script (hoja «GlowCam · Accesos»)
+  const LICENSE_URL = "https://script.google.com/macros/s/AKfycbw_vJgSvLgFWNesRuxj-fetakzWUjEB_qIE2PyF4JX1uCx_LtTZNGQIWR1klGogT79x7A/exec";
+  const GRACE_MS = 12 * 60 * 60 * 1000;   // sin internet: sigue funcionando 12 h
+  const RECHECK_MS = 30 * 60 * 1000;      // volver a comprobar cada 30 min
+
+  async function licGet() {
+    try { return await chrome.storage.local.get(["licKey", "licDevice", "licOkAt", "licUser"]); } catch (_) { return {}; }
+  }
+  async function licSet(o) { try { await chrome.storage.local.set(o); } catch (_) { /* nada */ } }
+  async function licClear() { try { await chrome.storage.local.remove(["licKey", "licOkAt", "licUser"]); } catch (_) { /* nada */ } }
+  async function deviceId() {
+    const s = await licGet();
+    if (s.licDevice) return s.licDevice;
+    const id = "PC-" + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+    await licSet({ licDevice: id });
+    return id;
+  }
+  async function verify(key) {
+    const dev = await deviceId();
+    try {
+      const url = LICENSE_URL + "?action=check&key=" + encodeURIComponent(key) + "&device=" + encodeURIComponent(dev);
+      const r = await fetch(url, { cache: "no-store", redirect: "follow", credentials: "omit" });
+      const j = await r.json();
+      return j && typeof j.ok === "boolean" ? j : { ok: null, reason: "network" };
+    } catch (_) {
+      return { ok: null, reason: "network" };
+    }
+  }
+  async function checkLicense(newKey) {
+    const s = await licGet();
+    const key = (newKey || s.licKey || "").trim().toUpperCase();
+    if (!key) { post({ type: "license", state: "need" }); return; }
+    const j = await verify(key);
+    if (j.ok === true) {
+      await licSet({ licKey: key, licOkAt: Date.now(), licUser: j.user || "" });
+      post({ type: "license", state: "ok", user: j.user || "", until: Date.now() + GRACE_MS });
+    } else if (j.ok === null) {
+      // Sin conexión: si la clave guardada se validó hace poco, seguir funcionando
+      if (!newKey && s.licOkAt && Date.now() - s.licOkAt < GRACE_MS) {
+        post({ type: "license", state: "ok", user: s.licUser || "", offline: true, until: s.licOkAt + GRACE_MS });
+      } else {
+        post({ type: "license", state: newKey ? "error" : (s.licKey ? "error" : "need"), reason: "network" });
+      }
+    } else {
+      if (!newKey) await licClear(); // la clave guardada ya no vale: pedirla de nuevo
+      post({ type: "license", state: "denied", reason: j.reason || "invalid", attempt: !!newKey });
+    }
+  }
+  setInterval(() => { if (parentOrigin) checkLicense(); }, RECHECK_MS);
   let parentOrigin = null;
   let selectedId = null;
 
@@ -247,6 +298,7 @@
     if (!m || m.gc !== true) return;
     if (m.type === "init") {
       parentOrigin = e.origin;
+      checkLicense();
       try {
         const r = await chrome.storage.local.get("settings");
         if (r.settings) post({ type: "settings", data: r.settings });
@@ -259,6 +311,8 @@
       await addFiles(m.files);
     } else if (m.type === "setRot") {
       await setRot(m.id, m.rot);
+    } else if (m.type === "activate") {
+      await checkLicense(String(m.key || ""));
     } else if (m.type === "saveSettings") {
       try { await chrome.storage.local.set({ settings: m.data }); } catch (_) { /* nada */ }
     } else if (m.type === "refresh") {
