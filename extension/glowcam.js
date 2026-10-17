@@ -12,7 +12,7 @@
   window.__glowcamLoaded = true;
   if (!window.MediaDevices || !navigator.mediaDevices) return;
 
-  const VERSION = "1.0.1";
+  const VERSION = "1.2.0";
   const DEVICE_ID = "glowcam-virtual-camera";
   const DEVICE_LABEL = "GlowCam";
   const FPS = 30;
@@ -108,9 +108,29 @@
     loop: store.get("loop", true),
     monitor: store.get("monitor", false),
     mixMic: store.get("mixMic", false),
-    videoId: store.get("videoId", null),
+    autoHang: store.get("autoHang", false),
+    hangBtn: store.get("hangBtn", null), // botón de colgar «enseñado» por el usuario
+    rotCam: store.get("rotCam", 0),
   };
-  const save = (k) => store.set(k, S[k]);
+  // Copia de seguridad de los ajustes en la extensión (por si Snapchat borra sus datos)
+  const SYNC_KEYS = ["enabled", "source", "camId", "format", "zoom", "offX", "offY", "mirror", "loop", "monitor", "mixMic", "autoHang", "hangBtn", "rotCam"];
+  let syncTimer = null;
+  function syncSettings() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      const data = {};
+      SYNC_KEYS.forEach((k) => { data[k] = S[k]; });
+      if (typeof lib !== "undefined") lib.send({ type: "saveSettings", data });
+    }, 300);
+  }
+  const save = (k) => { store.set(k, S[k]); syncSettings(); };
+  window.addEventListener("pagehide", () => {
+    if (!syncTimer) return;
+    clearTimeout(syncTimer);
+    const data = {};
+    SYNC_KEYS.forEach((k) => { data[k] = S[k]; });
+    try { lib.send({ type: "saveSettings", data }); } catch (_) { /* nada */ }
+  });
 
   // ------------------------------------------------------------------
   // Lienzo de salida
@@ -184,16 +204,37 @@
     return null;
   }
 
+  // Giro: 0/90/180/270 (cámara: ajuste propio; vídeo: guardado con cada vídeo)
+  const rotCanvas = document.createElement("canvas");
+  const rotCtx = rotCanvas.getContext("2d", { alpha: false });
+  function currentRotation() {
+    return S.source === "video" ? (currentVideo ? currentVideo.rot || 0 : 0) : S.rotCam || 0;
+  }
+  function rotated(el) {
+    const rot = currentRotation();
+    const vw = el.videoWidth, vh = el.videoHeight;
+    if (!rot) return { src: el, sw: vw, sh: vh };
+    const swap = rot === 90 || rot === 270;
+    const rw = swap ? vh : vw, rh = swap ? vw : vh;
+    if (rotCanvas.width !== rw || rotCanvas.height !== rh) { rotCanvas.width = rw; rotCanvas.height = rh; }
+    rotCtx.save();
+    rotCtx.translate(rw / 2, rh / 2);
+    rotCtx.rotate((rot * Math.PI) / 180);
+    rotCtx.drawImage(el, -vw / 2, -vh / 2, vw, vh);
+    rotCtx.restore();
+    return { src: rotCanvas, sw: rw, sh: rh };
+  }
+
   function render() {
     applySize();
     const f = FORMATS[S.format] || FORMATS[0];
     const W = canvas.width, H = canvas.height;
-    const el = currentElement();
-    if (!el) {
-      drawPlaceholder(S.source === "video" ? "Elige un vídeo" : "Cargando cámara…");
+    const live = currentElement();
+    if (!live) {
+      drawPlaceholder(S.source === "video" ? (libCount ? "Elige un vídeo" : "Añade un vídeo") : "Cargando cámara…");
       return;
     }
-    const sw = el.videoWidth, sh = el.videoHeight;
+    const { src: el, sw, sh } = rotated(live);
     if (!f.pillarbox) {
       drawSource(el, sw, sh, 0, 0, W, H, S.zoom, S.offX, S.offY);
       return;
@@ -280,57 +321,75 @@
     if (videoEl.paused && videoEl.currentTime === 0) videoEl.currentTime = 0.001;
   });
 
-  const db = {
-    _p: null,
-    open() {
-      if (this._p) return this._p;
-      this._p = new Promise((res, rej) => {
-        const r = indexedDB.open("glowcam", 1);
-        r.onupgradeneeded = () => r.result.createObjectStore("videos", { keyPath: "id" });
-        r.onsuccess = () => res(r.result);
-        r.onerror = () => rej(r.error);
-      });
-      return this._p;
+  // La biblioteca vive en un iframe de la propia extensión (library.html):
+  // sus vídeos se guardan en el almacenamiento de la extensión, no en Snapchat.
+  let currentVideo = null; // { id, name, rot }
+  let libCount = 0;
+  const lib = {
+    frame: null,
+    origin: null,
+    ready: false,
+    queue: [],
+    send(msg, transfer) {
+      if (!this.frame || !this.frame.contentWindow) return;
+      if (!this.ready && msg.type !== "init") { this.queue.push([msg, transfer]); return; }
+      this.frame.contentWindow.postMessage(Object.assign({ gc: true }, msg), this.origin, transfer || []);
     },
-    async tx(mode, fn) {
-      const d = await this.open();
-      return new Promise((res, rej) => {
-        const t = d.transaction("videos", mode);
-        const out = fn(t.objectStore("videos"));
-        t.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
-        t.onerror = () => rej(t.error);
-      });
+    create() {
+      const base = document.documentElement.getAttribute("data-glowcam-base");
+      if (!base) return null;
+      this.origin = new URL(base).origin;
+      const f = document.createElement("iframe");
+      f.src = base + "library.html";
+      f.setAttribute("allow", "");
+      f.style.cssText = "width:100%;height:120px;border:0;display:block;background:transparent;color-scheme:dark";
+      this.frame = f;
+      return f;
     },
-    list() { return this.tx("readonly", (s) => s.getAll()); },
-    get(id) { return this.tx("readonly", (s) => s.get(id)); },
-    put(v) { return this.tx("readwrite", (s) => s.put(v)); },
-    del(id) { return this.tx("readwrite", (s) => s.delete(id)); },
   };
 
-  async function addVideos(files) {
-    let last = null;
-    for (const f of files) {
-      if (!f.type.startsWith("video/") && !/\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name)) continue;
-      const v = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: f.name, blob: f, added: Date.now() };
-      await db.put(v);
-      last = v;
+  window.addEventListener("message", async (e) => {
+    if (!lib.frame || e.source !== lib.frame.contentWindow || e.origin !== lib.origin) return;
+    const m = e.data;
+    if (!m || m.gc !== true) return;
+    if (m.type === "hello") {
+      lib.frame.contentWindow.postMessage({ gc: true, type: "init" }, lib.origin);
+      lib.ready = true;
+      lib.queue.splice(0).forEach(([q, t]) => lib.send(q, t));
+    } else if (m.type === "height") {
+      lib.frame.style.height = Math.min(Math.max(m.h, 60), 320) + "px";
+    } else if (m.type === "settings") {
+      const d = m.data || {};
+      for (const k of SYNC_KEYS) if (k in d && d[k] !== undefined) { S[k] = d[k]; store.set(k, d[k]); }
+      videoEl.loop = !!S.loop;
+      ui.syncControls();
+    } else if (m.type === "count") {
+      libCount = m.n;
+    } else if (m.type === "select") {
+      await loadVideoBlob({ id: m.id, name: m.name, rot: m.rot || 0 }, m.blob, m.autoplay);
+    } else if (m.type === "cleared") {
+      currentVideo = null;
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+      videoUrl = null;
+      videoEl.removeAttribute("src");
+      videoEl.load();
+      ui.updateRotLabel();
     }
-    if (last) await selectVideo(last.id, true);
-    await ui.refreshVideos();
-  }
+  });
 
-  async function selectVideo(id, autoplay) {
-    const v = id ? await db.get(id) : null;
+  async function loadVideoBlob(info, blob, autoplay) {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
-    videoUrl = null;
-    S.videoId = v ? v.id : null;
-    save("videoId");
-    if (!v) { videoEl.removeAttribute("src"); videoEl.load(); return; }
-    videoUrl = URL.createObjectURL(v.blob);
+    currentVideo = info;
+    videoUrl = URL.createObjectURL(blob);
     videoEl.src = videoUrl;
     audio.connectVideo();
-    if (autoplay) { await audio.resume(); await videoEl.play().catch(() => {}); }
-    ui.setStatus("Vídeo: " + v.name);
+    ui.updateRotLabel();
+    ui.setStatus("Vídeo: " + info.name);
+    if (autoplay && S.source === "video") { await audio.resume(); await videoEl.play().catch(() => {}); }
+  }
+
+  function addVideos(files) {
+    lib.send({ type: "add", files: [...files] });
   }
 
   // ------------------------------------------------------------------
@@ -405,7 +464,6 @@
       await startCamera();
     } else {
       stopCamera();
-      if (!videoEl.src && S.videoId) await selectVideo(S.videoId, false);
       audio.connectVideo();
       await audio.resume();
       if (videoEl.src && videoEl.paused) await videoEl.play().catch(() => {});
@@ -453,6 +511,107 @@
 
   // Cuando Snapchat cuelga, apagar la cámara real si el panel está cerrado
   const handedOut = [];
+
+  // ------------------------------------------------------------------
+  // Colgar automáticamente al terminar el vídeo
+  // ------------------------------------------------------------------
+  const HANG_RE = /(end|leave|hang\s*up|finish|disconnect|exit)[\s_-]*(the\s*)?(video\s*)?(call|chat)?|colgar|finalizar|terminar(\s+la)?\s+llamada|salir\s+de\s+la\s+llamada|abandonar|cortar/i;
+
+  function clickable(el) {
+    return el && el.closest ? el.closest("button, [role=button], a, [tabindex]") || el : el;
+  }
+  function describe(el) {
+    el = clickable(el);
+    const txt = (el.textContent || "").trim().replace(/\s+/g, " ");
+    return {
+      aria: el.getAttribute("aria-label") || "",
+      title: el.getAttribute("title") || "",
+      testid: el.getAttribute("data-testid") || "",
+      text: txt.length <= 30 ? txt : "",
+      tag: el.tagName,
+    };
+  }
+  function visible(el) {
+    if (!el || !el.isConnected) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== "hidden" && st.display !== "none" && st.pointerEvents !== "none";
+  }
+  function candidates() {
+    const root = ui.root;
+    return [...document.querySelectorAll("button, [role=button], [aria-label], [title], [data-testid]")]
+      .filter((el) => !(root && root.contains(el)) && visible(el));
+  }
+  function findHangButton() {
+    const els = candidates();
+    const d = S.hangBtn;
+    if (d) {
+      const match = (el) => {
+        const e = describe(el);
+        if (d.testid && e.testid === d.testid) return 3;
+        if (d.aria && e.aria === d.aria) return 3;
+        if (d.title && e.title === d.title) return 2;
+        if (d.text && e.text === d.text && e.tag === d.tag) return 1;
+        return 0;
+      };
+      let best = null, bestScore = 0;
+      for (const el of els) { const sc = match(el); if (sc > bestScore) { best = el; bestScore = sc; } }
+      if (best) return clickable(best);
+    }
+    for (const el of els) {
+      const label = [el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("data-testid")].filter(Boolean).join(" ");
+      if (label && HANG_RE.test(label)) return clickable(el);
+    }
+    for (const el of els) {
+      const t = (el.textContent || "").trim();
+      if (t && t.length <= 25 && HANG_RE.test(t)) return clickable(el);
+    }
+    return null;
+  }
+  function realClick(el) {
+    const r = el.getBoundingClientRect();
+    const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+    try { el.dispatchEvent(new PointerEvent("pointerdown", opts)); } catch (_) { /* nada */ }
+    el.dispatchEvent(new MouseEvent("mousedown", opts));
+    try { el.dispatchEvent(new PointerEvent("pointerup", opts)); } catch (_) { /* nada */ }
+    el.dispatchEvent(new MouseEvent("mouseup", opts));
+    el.click();
+  }
+  function hangUp() {
+    const btn = findHangButton();
+    if (btn) {
+      realClick(btn);
+      ui.setStatus("📴 Vídeo terminado: llamada colgada.");
+      return true;
+    }
+    // Sin botón: cortar la imagen y el sonido que recibe Snapchat
+    for (const t of handedOut.splice(0)) {
+      try { t.stop(); t.dispatchEvent(new Event("ended")); } catch (_) { /* nada */ }
+    }
+    ui.setStatus("⚠️ No encontré el botón de colgar. Pulsa «🎯 Enseñar botón de colgar» y luego el botón de colgar de Snapchat.");
+    return false;
+  }
+  videoEl.addEventListener("ended", () => {
+    if (S.autoHang && S.source === "video" && handedOut.some((t) => t.readyState === "live")) {
+      setTimeout(hangUp, 400);
+    }
+  });
+
+  // Modo «enseñar»: el siguiente clic fuera del panel se guarda como botón de colgar
+  function learnHangButton() {
+    ui.setStatus("🎯 Ahora pulsa el botón de colgar de Snapchat (en una llamada)…");
+    const onClick = (e) => {
+      const path = e.composedPath ? e.composedPath() : [e.target];
+      if (ui.root && path.includes(ui.root)) return; // clics en el panel no cuentan
+      document.removeEventListener("click", onClick, true);
+      S.hangBtn = describe(e.target);
+      save("hangBtn");
+      const name = S.hangBtn.aria || S.hangBtn.title || S.hangBtn.text || S.hangBtn.testid || "botón";
+      ui.setStatus(`✅ Botón de colgar guardado («${name}»).`);
+    };
+    document.addEventListener("click", onClick, true);
+  }
   setInterval(() => {
     for (let i = handedOut.length - 1; i >= 0; i--) if (handedOut[i].readyState === "ended") handedOut.splice(i, 1);
     if (handedOut.length === 0 && ui.els.pill && ui.els.pill.classList.contains("live")) {
@@ -521,26 +680,27 @@
         sel.replaceChildren(o);
       }
     },
-    async refreshVideos() {
-      const box = this.els.videoList;
-      if (!box) return;
-      let vids = [];
-      try { vids = (await db.list()).sort((a, b) => b.added - a.added); } catch (_) { /* nada */ }
-      if (!vids.length) {
-        box.replaceChildren(h("div", { class: "empty" }, "Aún no hay vídeos. Añade uno 👇"));
-        return;
-      }
-      box.replaceChildren(...vids.map((v) => {
-        const row = h("div", { class: "vid" + (v.id === S.videoId ? " sel" : "") },
-          h("span", { class: "vname", title: v.name, onclick: () => selectVideo(v.id, true).then(() => this.refreshVideos()) },
-            (v.id === S.videoId ? "▶ " : "") + v.name),
-          h("button", { class: "del", title: "Quitar de la lista", onclick: async () => {
-            await db.del(v.id);
-            if (S.videoId === v.id) await selectVideo(null);
-            this.refreshVideos();
-          } }, "✕"));
-        return row;
-      }));
+    refreshVideos() { lib.send({ type: "refresh" }); },
+    syncControls() {
+      const E = this.els;
+      if (!E.panel) return;
+      E.enabled.checked = S.enabled;
+      E.pill.classList.toggle("off", !S.enabled);
+      E.loop.checked = S.loop;
+      E.autoHang.checked = S.autoHang;
+      E.monitor.checked = S.monitor;
+      E.mixMic.checked = S.mixMic;
+      E.mirror.checked = S.mirror;
+      E.format.value = String(S.format);
+      E.zoom.value = S.zoom; E.offX.value = S.offX; E.offY.value = S.offY;
+      if (this.setSource && E.panel.dataset.source !== S.source) this.setSource(S.source);
+      audio.update();
+      this.updateRotLabel();
+    },
+    updateRotLabel() {
+      if (!this.els.rotLabel) return;
+      const r = currentRotation();
+      this.els.rotLabel.textContent = r ? r + "°" : "";
     },
   };
 
@@ -606,6 +766,7 @@
   .hint { margin-top: 6px; color: #8a8a96; font-size: 11px; line-height: 1.4; }
   .warn { display: none; margin: 6px 0; padding: 7px 9px; background: #3a2a10; color: #ffcf7a; border-radius: 8px; font-size: 12px; cursor: pointer; }
   .hidden { display: none !important; }
+  .rotlabel { color: #ff8cc0; font-size: 12px; font-weight: 700; min-width: 30px; }
   `;
 
   function fmtTime(s) {
@@ -655,24 +816,27 @@
     const camBox = h("div", {}, h("label", { class: "row" }, "Cámara", E.camSel));
 
     // Vídeo
-    E.videoList = h("div", { class: "videos" });
-    E.file = h("input", { type: "file", accept: "video/*", multiple: true, class: "hidden", onchange: async (e) => {
-      const input = e.currentTarget || E.file;
-      const files = [...input.files];
-      await audio.resume();
-      await addVideos(files);
-      input.value = "";
-    } });
+    const libFrame = lib.create();
+    E.videoList = libFrame || h("div", { class: "empty" }, "No se pudo abrir la biblioteca. Recarga la página.");
     E.play = h("button", { class: "btn", onclick: async () => {
       await audio.resume();
-      if (!videoEl.src) { E.file.click(); return; }
+      if (!videoEl.src) return;
       if (videoEl.paused) await videoEl.play().catch(() => {}); else videoEl.pause();
     } }, "▶");
     E.seek = h("input", { type: "range", min: 0, max: 1000, value: 0, oninput: (e) => {
       if (isFinite(videoEl.duration)) videoEl.currentTime = (e.target.value / 1000) * videoEl.duration;
     } });
     E.time = h("span", { class: "time" }, "0:00 / 0:00");
-    E.loop = h("input", { type: "checkbox", onchange: (e) => { set("loop", e.target.checked); videoEl.loop = S.loop; } });
+    E.loop = h("input", { type: "checkbox", onchange: (e) => {
+      set("loop", e.target.checked); videoEl.loop = S.loop;
+      if (S.loop && S.autoHang) { set("autoHang", false); E.autoHang.checked = false; }
+    } });
+    E.autoHang = h("input", { type: "checkbox", onchange: (e) => {
+      set("autoHang", e.target.checked);
+      if (S.autoHang && S.loop) { set("loop", false); E.loop.checked = false; videoEl.loop = false; }
+      ui.setStatus(S.autoHang ? "Al terminar el vídeo se colgará la llamada." : "Colgar automático desactivado.");
+    } });
+    E.autoHang.checked = S.autoHang;
     E.loop.checked = S.loop;
     E.monitor = h("input", { type: "checkbox", onchange: (e) => { set("monitor", e.target.checked); audio.update(); } });
     E.monitor.checked = S.monitor;
@@ -685,13 +849,14 @@
     E.audioWarn = h("div", { class: "warn", onclick: () => audio.resume() }, "🔇 Pulsa aquí para activar el sonido del vídeo");
     const vidBox = h("div", {},
       E.videoList,
-      h("button", { class: "btn primary", onclick: () => E.file.click() }, "＋ Añadir vídeo"),
-      E.file,
       h("div", { class: "player" }, E.play, E.seek, E.time),
       h("div", { class: "checks" },
         h("label", {}, E.loop, "Repetir en bucle"),
+        h("label", {}, E.autoHang, "Colgar al terminar el vídeo"),
         h("label", {}, E.monitor, "Escucharlo yo"),
         h("label", {}, E.mixMic, "Mezclar mi micro")),
+      h("div", { class: "checks" },
+        h("button", { class: "btn", title: "Enseñar botón de colgar", onclick: learnHangButton }, "🎯 Enseñar botón de colgar")),
       E.audioWarn);
 
     videoEl.addEventListener("play", () => { E.play.textContent = "⏸"; });
@@ -731,14 +896,28 @@
       h("label", { class: "row" }, "Arriba / Abajo", E.offY),
       h("div", { class: "checks" },
         h("label", {}, E.mirror, "Espejo"),
+        h("button", { class: "btn", title: "Girar 90°", onclick: rotate }, "⟳ Girar"),
+        (E.rotLabel = h("span", { class: "rotlabel" }, "")),
         h("button", { class: "btn", onclick: () => {
           ["zoom", "offX", "offY"].forEach((k) => { set(k, k === "zoom" ? 1 : 0); E[k].value = S[k]; });
         } }, "Centrar")),
       E.status,
       h("div", { class: "hint" }, "En la videollamada elige la cámara «GlowCam». Mantén esta ventana visible durante la llamada. v" + VERSION));
 
+    function rotate() {
+      if (S.source === "video") {
+        if (!currentVideo) return;
+        currentVideo.rot = ((currentVideo.rot || 0) + 90) % 360;
+        lib.send({ type: "setRot", id: currentVideo.id, rot: currentVideo.rot });
+      } else {
+        set("rotCam", ((S.rotCam || 0) + 90) % 360);
+      }
+      ui.updateRotLabel();
+    }
+
     function setSource(src) {
       set("source", src);
+      E.panel.dataset.source = src;
       segCam.classList.toggle("on", src === "camera");
       segVid.classList.toggle("on", src === "video");
       camBox.classList.toggle("hidden", src !== "camera");
@@ -752,8 +931,10 @@
         ui.refreshVideos();
       }
       ui.updateAudioWarning();
+      ui.updateRotLabel();
     }
     ui.setSource = setSource;
+    E.panel.dataset.source = S.source;
     segCam.classList.toggle("on", S.source === "camera");
     segVid.classList.toggle("on", S.source === "video");
     camBox.classList.toggle("hidden", S.source !== "camera");
@@ -766,7 +947,7 @@
       if (e.dataTransfer && e.dataTransfer.files.length) {
         await audio.resume();
         setSource("video");
-        await addVideos([...e.dataTransfer.files]);
+        addVideos([...e.dataTransfer.files]);
       }
     });
 
@@ -780,7 +961,6 @@
       if (document.getElementById("glowcam-root")) return;
       buildUI();
       startTicker();
-      if (S.source === "video" && S.videoId && !videoEl.src) selectVideo(S.videoId, false).catch(() => {});
     };
     if (document.body) mount();
     else document.addEventListener("DOMContentLoaded", mount, { once: true });
@@ -788,5 +968,5 @@
     setInterval(() => { if (document.body) mount(); }, 3000);
   }
 
-  window.__glowcam = { S, FORMATS, canvas, render, selectVideo, addVideos, videoEl, camEl, version: VERSION };
+  window.__glowcam = { hangUp, findHangButton, S, FORMATS, canvas, render, addVideos, videoEl, camEl, lib, get currentVideo() { return currentVideo; }, version: VERSION };
 })();
