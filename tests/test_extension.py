@@ -13,7 +13,9 @@ from playwright.async_api import async_playwright
 
 EXT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extension")
 TEST_URL = "https://web.snapchat.com/__glowcam_test__"
-PAGE = "<!doctype html><html><head><meta charset=utf-8></head><body style='background:#fff'><h1>test</h1></body></html>"
+PAGE = ("<!doctype html><html><head><meta charset=utf-8></head><body style='background:#fff'><h1>test</h1>"
+        "<button aria-label='End call' id='endcall' onclick='window.__hang=(window.__hang||0)+1'>📞</button> "
+        "<button id='weird' onclick='window.__weird=(window.__weird||0)+1'>✖</button></body></html>")
 
 # Lee el brillo medio y la variación de un fotograma de una pista de vídeo
 FRAME_STATS = """
@@ -123,11 +125,25 @@ async def main(video_path, shot):
         check("Formato «con bordes» sale a 1280×720", (st3["w"], st3["h"]) == (1280, 720), f"{st3['w']}x{st3['h']}")
         await page.evaluate("window.__glowcam.S.format = 0")
 
-        # --- Modo vídeo (subido desde el panel, como haría un chatter) ---
+        # --- Modo vídeo: biblioteca (iframe de la extensión), como haría un chatter ---
+        LIB = "#glowcam-root iframe"
         await page.click("#glowcam-root >> .pill")
         await page.click("#glowcam-root >> .seg button:nth-child(2)")
-        await page.set_input_files("#glowcam-root >> input[type=file]", video_path)
-        await page.wait_for_function("window.__glowcam.S.videoId && !document.querySelector('#glowcam-root').shadowRoot.querySelector('.empty')", timeout=10000)
+        lib = page.frame_locator(LIB)
+        await lib.locator("#add").wait_for(timeout=10000)
+        await lib.locator("#file").set_input_files(video_path)
+        await page.wait_for_function("window.__glowcam.currentVideo", timeout=15000)
+        await lib.locator("#file").set_input_files(video_path)
+        await lib.locator(".row >> nth=1").wait_for(timeout=15000)
+        rows = await lib.locator(".row").count()
+        check("Se pueden guardar varios vídeos en la biblioteca", rows == 2, f"{rows} vídeos")
+        thumbs = await lib.locator("img.thumb").count()
+        check("Cada vídeo tiene miniatura", thumbs == 2, f"{thumbs} miniaturas")
+        # Elegir el otro vídeo de la lista
+        first_id = await page.evaluate("window.__glowcam.currentVideo.id")
+        await lib.locator(".row:not(.sel)").first.click()
+        await page.wait_for_function(f"window.__glowcam.currentVideo && window.__glowcam.currentVideo.id !== '{first_id}'", timeout=10000)
+        check("Elegir otro vídeo de la lista lo cambia", True)
         await page.wait_for_timeout(1500)
         await page.evaluate("window.__s.getTracks().forEach(t => t.stop())")
         vid = await page.evaluate("""async () => {
@@ -148,13 +164,56 @@ async def main(video_path, shot):
         }}""")
         check("Petición solo de micrófono también lleva el audio del vídeo", ao > 0.05, f"pico={ao}")
 
-        # Persistencia: recargar y comprobar que el vídeo sigue en la lista
+        # Girar el vídeo 90°
+        await page.evaluate("window.__glowcam.videoEl.pause(); window.__glowcam.videoEl.currentTime = 1")
+        await page.wait_for_timeout(600)
+        before = await page.evaluate(f"({FRAME_STATS})(window.__s)")
+        await page.click("#glowcam-root >> button[title='Girar 90°']")
+        await page.wait_for_timeout(600)
+        after = await page.evaluate(f"({FRAME_STATS})(window.__s)")
+        rot = await page.evaluate("window.__glowcam.currentVideo.rot")
+        label = await page.evaluate("document.querySelector('#glowcam-root').shadowRoot.querySelector('.rotlabel').textContent")
+        check("Girar 90° cambia la imagen y mantiene 720×1280",
+              rot == 90 and before["hash"] != after["hash"] and (after["w"], after["h"]) == (720, 1280) and label == "90°",
+              f"rot={rot} etiqueta={label} {after['w']}x{after['h']}")
+        sel_id = await page.evaluate("window.__glowcam.currentVideo.id")
+
+        # Colgar al terminar el vídeo
+        await page.click("#glowcam-root >> text=Colgar al terminar el vídeo")
+        loop_off = await page.evaluate("!window.__glowcam.S.loop && window.__glowcam.S.autoHang")
+        await page.evaluate("(() => { const v = window.__glowcam.videoEl; v.currentTime = Math.max(0, v.duration - 0.4); return v.play(); })()")
+        await page.wait_for_timeout(2500)
+        hang = await page.evaluate("window.__hang || 0")
+        check("Al terminar el vídeo pulsa el botón de colgar", hang == 1 and loop_off, f"clics en colgar={hang}, bucle desactivado={loop_off}")
+
+        # Enseñar un botón de colgar con otro nombre
+        await page.click("#glowcam-root >> button[title='Enseñar botón de colgar']")
+        await page.click("#weird")
+        await page.evaluate("window.__glowcam.hangUp()")
+        weird = await page.evaluate("window.__weird || 0")
+        check("El botón «enseñado» se usa para colgar", weird == 2, f"clics={weird} (1 al enseñarlo + 1 al colgar)")
+        await page.wait_for_timeout(1000)
+
+        # Persistencia: Snapchat borra SUS datos y se recarga → la biblioteca sigue
+        await page.evaluate("""async () => {
+            localStorage.clear(); sessionStorage.clear();
+            const dbs = indexedDB.databases ? await indexedDB.databases() : [];
+            await Promise.all(dbs.map(d => new Promise(r => { const q = indexedDB.deleteDatabase(d.name); q.onsuccess = q.onerror = q.onblocked = r; })));
+        }""")
         await page.reload()
         await page.wait_for_function("document.getElementById('glowcam-root')", timeout=15000)
         await page.click("#glowcam-root >> .pill")
-        await page.wait_for_timeout(1200)
-        n = await page.evaluate("document.querySelector('#glowcam-root').shadowRoot.querySelectorAll('.vid').length")
-        check("El vídeo queda guardado tras recargar", n == 1, f"{n} vídeo(s)")
+        await page.click("#glowcam-root >> .seg button:nth-child(2)")
+        lib = page.frame_locator(LIB)
+        await lib.locator(".row >> nth=1").wait_for(timeout=15000)
+        n = await lib.locator(".row").count()
+        check("Los vídeos siguen guardados aunque Snapchat borre sus datos", n == 2, f"{n} vídeo(s)")
+        await page.wait_for_function("window.__glowcam.currentVideo", timeout=10000)
+        restored = await page.evaluate("({id: window.__glowcam.currentVideo.id, rot: window.__glowcam.currentVideo.rot})")
+        check("Se recuerda el vídeo elegido y su giro", restored == {"id": sel_id, "rot": 90}, str(restored))
+        await page.wait_for_timeout(800)
+        kept = await page.evaluate("({ah: window.__glowcam.S.autoHang, loop: window.__glowcam.S.loop, btn: !!window.__glowcam.S.hangBtn, src: window.__glowcam.S.source})")
+        check("Los ajustes (colgar, bucle, botón enseñado) también se conservan", kept == {"ah": True, "loop": False, "btn": True, "src": "video"}, str(kept))
 
         if shot:
             await page.wait_for_timeout(1500)
