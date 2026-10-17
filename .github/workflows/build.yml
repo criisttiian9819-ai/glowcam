@@ -9,6 +9,39 @@ permissions:
   contents: write
 
 jobs:
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Probar la extensión en Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+          ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1080x1920:rate=30 -f lavfi -i sine=frequency=440 -t 6 -c:v libvpx-vp9 -b:v 1M -deadline realtime -c:a libopus test.webm
+          python tests/test_extension.py test.webm
+
+      - name: Empaquetar extensión
+        run: |
+          mkdir -p out/GlowCam-Extension
+          cp -R extension/* out/GlowCam-Extension/
+          cd out && zip -r ../GlowCam-Extension.zip GlowCam-Extension
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GlowCam-Extension.zip
+          path: GlowCam-Extension.zip
+
+      - name: Publicar descarga
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: GlowCam-Extension.zip
+
   build:
     strategy:
       fail-fast: false
@@ -34,7 +67,7 @@ jobs:
       - name: Pruebas
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q tests -k "not window_builds"
+        run: python -m pytest -q tests/test_core.py -k "not window_builds"
 
       - name: Compilar
         run: pyinstaller glowcam.spec --noconfirm
