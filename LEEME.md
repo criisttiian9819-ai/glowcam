@@ -26,17 +26,28 @@ No necesita OBS, ni drivers, ni micrófono virtual. El audio del vídeo va inclu
 ### Usar
 
 1. En Snapchat aparece abajo a la derecha el botón rosa **● GlowCam**. Púlsalo para abrir el panel.
-2. Elige **📷 Cámara** (y qué cámara) o **🎬 Vídeo** (pulsa «＋ Añadir vídeo» o arrastra el vídeo al panel; se quedan guardados).
-3. Ajusta formato, zoom y encuadre mirando la vista previa.
+2. Elige **📷 Cámara** (y qué cámara) o **🎬 Vídeo**.
+3. Ajusta formato, zoom, encuadre y **⟳ Girar** (90° cada pulsación) mirando la vista previa.
 4. En la videollamada, en el selector de cámara de Snapchat, elige **«GlowCam»**.
 
-Opciones del modo vídeo:
+### Biblioteca de vídeos
+
+- **＋ Añadir vídeos** (puedes elegir varios a la vez) o arrástralos al panel.
+- Quedan **guardados para siempre dentro de la extensión**, con miniatura y duración, aunque cierres Chrome o Snapchat borre sus datos.
+- Pulsa un vídeo de la lista para ponerlo. El ✕ lo borra (pide confirmación con un segundo clic).
+- El giro se recuerda **para cada vídeo**.
+
+### Opciones del modo vídeo
+
 - **Repetir en bucle**.
+- **Colgar al terminar el vídeo**: cuando acaba el vídeo, GlowCam pulsa el botón de colgar de Snapchat (desactiva el bucle).
+- **🎯 Enseñar botón de colgar**: si alguna vez no cuelga solo, pulsa este botón y después, en una llamada, pulsa tú el botón de colgar de Snapchat. GlowCam lo recuerda.
 - **Escucharlo yo**: oyes el vídeo por tus altavoces (mejor con auriculares).
 - **Mezclar mi micro**: el fan oye el vídeo y además tu voz.
 
 > Mantén la ventana de Snapchat visible durante la llamada para que la imagen vaya fluida.
 > Para volver a tu cámara normal: elige tu cámara de siempre en Snapchat, o desmarca «Activado» en el panel.
+> Al actualizar la extensión, deja la carpeta **en el mismo sitio y con el mismo nombre**: así se conservan los vídeos guardados.
 
 ---
 
