@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GlowCam para Snapchat",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Usa tu cámara en formato vertical o un vídeo con su audio en las videollamadas de Snapchat web.",
   "icons": {
     "16": "icons/icon16.png",

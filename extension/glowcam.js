@@ -12,7 +12,7 @@
   window.__glowcamLoaded = true;
   if (!window.MediaDevices || !navigator.mediaDevices) return;
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.1";
   const DEVICE_ID = "glowcam-virtual-camera";
   const DEVICE_LABEL = "GlowCam";
   const FPS = 30;
@@ -25,6 +25,61 @@
   const origGUM = MediaDevices.prototype.getUserMedia;
   const origEnum = MediaDevices.prototype.enumerateDevices;
   const isTop = window.top === window;
+
+  // ------------------------------------------------------------------
+  // «Identidad» de las pistas de GlowCam: Snapchat comprueba qué cámara le
+  // llegó con track.getSettings().deviceId y track.label. Sin esto marca la
+  // opción y la desmarca al instante.
+  // ------------------------------------------------------------------
+  const branded = new WeakMap(); // pista -> { label, settings }
+  const T = MediaStreamTrack.prototype;
+  const origGetSettings = T.getSettings;
+  const origGetCaps = T.getCapabilities;
+  const origGetConstraints = T.getConstraints;
+  const origClone = T.clone;
+  const labelDesc = Object.getOwnPropertyDescriptor(T, "label");
+
+  function brand(track, info) {
+    branded.set(track, info);
+    return track;
+  }
+  function hideNative(fn, name) {
+    try { Object.defineProperty(fn, "toString", { value: () => `function ${name}() { [native code] }` }); } catch (_) { /* nada */ }
+    return fn;
+  }
+  try {
+    Object.defineProperty(T, "label", {
+      configurable: true,
+      enumerable: labelDesc ? labelDesc.enumerable : true,
+      get: hideNative(function () {
+        const b = branded.get(this);
+        return b ? b.label : labelDesc.get.call(this);
+      }, "get label"),
+    });
+  } catch (_) { /* navegador sin soporte */ }
+  T.getSettings = hideNative(function () {
+    const real = origGetSettings.call(this);
+    const b = branded.get(this);
+    return b ? Object.assign({}, real, b.settings()) : real;
+  }, "getSettings");
+  if (origGetCaps) {
+    T.getCapabilities = hideNative(function () {
+      const real = origGetCaps.call(this) || {};
+      const b = branded.get(this);
+      return b ? Object.assign({}, real, b.caps ? b.caps() : { deviceId: b.settings().deviceId, groupId: b.settings().groupId }) : real;
+    }, "getCapabilities");
+  }
+  T.getConstraints = hideNative(function () {
+    const real = origGetConstraints.call(this) || {};
+    const b = branded.get(this);
+    return b ? Object.assign({}, real, { deviceId: { exact: b.settings().deviceId } }) : real;
+  }, "getConstraints");
+  T.clone = hideNative(function () {
+    const c = origClone.call(this);
+    const b = branded.get(this);
+    if (b) branded.set(c, b);
+    return c;
+  }, "clone");
 
   // ------------------------------------------------------------------
   // Ajustes (guardados en el navegador, por usuario)
@@ -361,7 +416,15 @@
     await audio.resume();
     try { await audio.ensureMic(audioConstraints); } catch (e) { if (S.source !== "video") throw e; }
     audio.update();
-    return audio.track().clone();
+    const at = audio.track().clone();
+    const mic = audio.micStream && audio.micStream.getAudioTracks()[0];
+    return brand(at, {
+      label: mic ? mic.label : "GlowCam Audio",
+      settings: () => {
+        const ms = mic ? origGetSettings.call(mic) : {};
+        return { deviceId: ms.deviceId || "default", groupId: ms.groupId || "glowcam", channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+      },
+    });
   }
 
   async function glowGetUserMedia(constraints) {
@@ -375,7 +438,11 @@
 
     const tracks = [];
     await prepareSource().catch((e) => ui.setStatus("Cámara: " + (e && e.message ? e.message : e)));
-    const vt = getOutStream().getVideoTracks()[0].clone();
+    const vt = brand(getOutStream().getVideoTracks()[0].clone(), {
+      label: DEVICE_LABEL,
+      settings: () => ({ deviceId: DEVICE_ID, groupId: "glowcam", width: canvas.width, height: canvas.height, aspectRatio: canvas.width / canvas.height, frameRate: FPS, facingMode: "user", resizeMode: "none" }),
+      caps: () => ({ deviceId: DEVICE_ID, groupId: "glowcam", width: { min: 1, max: 1920 }, height: { min: 1, max: 1920 }, frameRate: { min: 1, max: FPS }, facingMode: ["user"], aspectRatio: { min: 0.1, max: 10 } }),
+    });
     tracks.push(vt);
     if (c.audio) tracks.push(await mixedAudioTrack(c.audio));
     ui.setStatus("🔴 Snapchat está usando GlowCam");
