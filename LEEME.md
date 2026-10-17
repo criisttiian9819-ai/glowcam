@@ -26,7 +26,8 @@ No necesita OBS, ni drivers, ni micrófono virtual. El audio del vídeo va inclu
 
 ### Usar
 
-1. En Snapchat aparece abajo a la derecha el botón rosa **● GlowCam**. Púlsalo para abrir el panel.
+1. En Snapchat aparece **abajo a la izquierda** el botón rosa **● GlowCam**. Púlsalo para abrir el panel.
+   Puedes **arrastrar el botón** y **la ventana** (cogiéndola por el título) a donde quieras: se queda en ese sitio. El **✕** la cierra.
 2. Elige **📷 Cámara** (y qué cámara) o **🎬 Vídeo**.
 3. Ajusta formato, zoom, encuadre y **⟳ Girar** (90° cada pulsación) mirando la vista previa.
 4. En la videollamada, en el selector de cámara de Snapchat, elige **«GlowCam»**.
@@ -85,6 +86,6 @@ Los chatters meten la clave **una sola vez**. La extensión la comprueba sola al
 
 Cada etiqueta nueva (`v1.3.1`, `v1.4.0`…) en el repositorio hace que GitHub pruebe y genere las descargas solo. Los links siempre apuntan a la última versión.
 
-Para actualizar la extensión: descarga el zip nuevo, sustituye la carpeta GlowCam-Extension por la nueva y en `chrome://extensions` pulsa ↻ en GlowCam.
+Para actualizar la extensión: descarga el zip nuevo, sustituye la carpeta GlowCam-Extension por la nueva (**mismo sitio y mismo nombre**: así se conservan la clave y los vídeos) y en `chrome://extensions` pulsa ↻ en GlowCam. El propio panel avisa cuando hay versión nueva.
 
 La cámara virtual de Windows es el componente de OBS Studio (licencia GPL, incluida en `vcam\OBS-LICENSE.txt`).
