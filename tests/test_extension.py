@@ -7,11 +7,18 @@ Uso: python tests/test_extension.py RUTA_VIDEO_CON_AUDIO.mp4 [captura.png]
 import asyncio
 import os
 import sys
+import json
+import re
+import shutil
 import tempfile
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import async_playwright
 
 EXT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extension")
+LICENSE_URL = "https://script.google.com/macros/s/TEST/exec"
+GOOD_KEY = "GLOW-TEST-1234-ABCD"
+SERVER = {"offline": False, "calls": 0, "keys": {GOOD_KEY: {"user": "Nicolás", "active": True, "device": ""}}}
 TEST_URL = "https://web.snapchat.com/__glowcam_test__"
 PAGE = ("<!doctype html><html><head><meta charset=utf-8></head><body style='background:#fff'><h1>test</h1>"
         "<button aria-label='End call' id='endcall' onclick='window.__hang=(window.__hang||0)+1'>📞</button> "
@@ -54,13 +61,21 @@ async def main(video_path, shot):
 
     async with async_playwright() as p:
         user_dir = tempfile.mkdtemp()
+        # Copia de la extensión apuntando a un panel de claves simulado
+        ext = os.path.join(tempfile.mkdtemp(), "ext")
+        shutil.copytree(EXT, ext)
+        lp = os.path.join(ext, "library.js")
+        with open(lp, encoding="utf-8") as f:
+            src = f.read()
+        with open(lp, "w", encoding="utf-8") as f:
+            f.write(re.sub(r'const LICENSE_URL = "[^"]*";', 'const LICENSE_URL = "' + LICENSE_URL + '";', src))
         ctx = await p.chromium.launch_persistent_context(
             user_dir,
             headless=True,
             channel="chromium",
             args=[
-                f"--disable-extensions-except={EXT}",
-                f"--load-extension={EXT}",
+                f"--disable-extensions-except={ext}",
+                f"--load-extension={ext}",
                 "--use-fake-device-for-media-stream",
                 "--use-fake-ui-for-media-stream",
                 "--autoplay-policy=no-user-gesture-required",
@@ -69,11 +84,49 @@ async def main(video_path, shot):
             viewport={"width": 1280, "height": 860},
         )
         await ctx.route("https://web.snapchat.com/**", lambda r: r.fulfill(status=200, content_type="text/html", body=PAGE))
+
+        async def license_route(route):
+            if SERVER["offline"]:
+                await route.abort()
+                return
+            q = {k: v[0] for k, v in parse_qs(urlparse(route.request.url).query).items()}
+            SERVER["calls"] += 1
+            u = SERVER["keys"].get(q.get("key", "").upper())
+            if q.get("action") != "check":
+                res = {"ok": False, "reason": "bad_request"}
+            elif not u:
+                res = {"ok": False, "reason": "invalid"}
+            elif not u["active"]:
+                res = {"ok": False, "reason": "disabled"}
+            elif u["device"] and u["device"] != q.get("device"):
+                res = {"ok": False, "reason": "device"}
+            else:
+                u["device"] = u["device"] or q.get("device")
+                res = {"ok": True, "user": u["user"]}
+            await route.fulfill(status=200, content_type="application/json", body=json.dumps(res))
+        await ctx.route("https://script.google.com/**", license_route)
         page = await ctx.new_page()
         page.on("pageerror", lambda e: print("pageerror:", e))
         await page.goto(TEST_URL)
         await page.wait_for_function("window.__glowcam && document.getElementById('glowcam-root')", timeout=15000)
         check("Extensión cargada y panel visible", True)
+
+        # --- Clave de acceso ---
+        await page.wait_for_timeout(1500)
+        locked_devs = await page.evaluate("navigator.mediaDevices.enumerateDevices().then(l => l.filter(d=>d.kind==='videoinput').map(d=>d.label))")
+        check("Sin clave: GlowCam no aparece en Snapchat", "GlowCam" not in locked_devs, str(locked_devs))
+        await page.click("#glowcam-root >> .pill")
+        await page.fill("#glowcam-root >> .keyinput", "GLOW-AAAA-BBBB-CCCC")
+        await page.click("#glowcam-root >> .lock .btn.primary")
+        await page.wait_for_function("document.querySelector('#glowcam-root').shadowRoot.querySelector('.lockmsg').textContent.length > 0", timeout=10000)
+        msg = await page.evaluate("document.querySelector('#glowcam-root').shadowRoot.querySelector('.lockmsg').textContent")
+        check("Clave incorrecta: avisa y sigue bloqueado", "incorrecta" in msg, msg)
+        await page.fill("#glowcam-root >> .keyinput", GOOD_KEY.lower())
+        await page.click("#glowcam-root >> .lock .btn.primary")
+        await page.wait_for_function("!document.querySelector('#glowcam-root').shadowRoot.querySelector('.panel').classList.contains('locked')", timeout=10000)
+        who = await page.evaluate("document.querySelector('#glowcam-root').shadowRoot.querySelector('.who').textContent")
+        check("Clave buena: se desbloquea y muestra el chatter", "Nicolás" in who, who)
+        await page.click("#glowcam-root >> .pill")  # cerrar panel
 
         devs = await page.evaluate("navigator.mediaDevices.enumerateDevices().then(l => l.filter(d=>d.kind==='videoinput').map(d=>({id:d.deviceId,label:d.label})))")
         check("«GlowCam» aparece primero en la lista de cámaras", devs and devs[0]["label"] == "GlowCam", str([d["label"] for d in devs]))
@@ -214,6 +267,42 @@ async def main(video_path, shot):
         await page.wait_for_timeout(800)
         kept = await page.evaluate("({ah: window.__glowcam.S.autoHang, loop: window.__glowcam.S.loop, btn: !!window.__glowcam.S.hangBtn, src: window.__glowcam.S.source})")
         check("Los ajustes (colgar, bucle, botón enseñado) también se conservan", kept == {"ah": True, "loop": False, "btn": True, "src": "video"}, str(kept))
+        devs2 = await page.evaluate("navigator.mediaDevices.enumerateDevices().then(l => l.map(d=>d.label))")
+        check("La clave sigue activa tras recargar (no la vuelve a pedir)", "GlowCam" in devs2)
+
+        # Sin internet: sigue funcionando (margen de 12 h)
+        SERVER["offline"] = True
+        await page.reload()
+        await page.wait_for_function("document.getElementById('glowcam-root')", timeout=15000)
+        await page.wait_for_timeout(2500)
+        off = await page.evaluate("document.querySelector('#glowcam-root').shadowRoot.querySelector('.panel').classList.contains('locked')")
+        check("Sin internet sigue funcionando", off is False)
+        SERVER["offline"] = False
+
+        # El responsable desactiva la clave → al volver a abrir Snapchat se bloquea
+        SERVER["keys"][GOOD_KEY]["active"] = False
+        await page.reload()
+        await page.wait_for_function("document.getElementById('glowcam-root')", timeout=15000)
+        await page.wait_for_function("document.querySelector('#glowcam-root').shadowRoot.querySelector('.panel').classList.contains('locked')", timeout=10000)
+        devs3 = await page.evaluate("navigator.mediaDevices.enumerateDevices().then(l => l.map(d=>d.label))")
+        await page.click("#glowcam-root >> .pill")
+        msg3 = await page.evaluate("document.querySelector('#glowcam-root').shadowRoot.querySelector('.lockmsg').textContent")
+        check("Clave desactivada: se bloquea y pide clave", "GlowCam" not in devs3 and "desactivado" in msg3, msg3)
+        prev_calls = SERVER["calls"]
+
+        # Clave usada ya en otro ordenador
+        SERVER["keys"]["GLOW-OTRO-PC22-XXXX"] = {"user": "Ana", "active": True, "device": "PC-de-otra-persona"}
+        await page.fill("#glowcam-root >> .keyinput", "GLOW-OTRO-PC22-XXXX")
+        await page.click("#glowcam-root >> .lock .btn.primary")
+        await page.wait_for_function("document.querySelector('#glowcam-root').shadowRoot.querySelector('.lockmsg').textContent.includes('ordenador')", timeout=10000)
+        check("Clave de otro ordenador: no se puede compartir", SERVER["calls"] > prev_calls)
+
+        # Reactivar → vuelve a funcionar al meter la clave
+        SERVER["keys"][GOOD_KEY]["active"] = True
+        await page.fill("#glowcam-root >> .keyinput", GOOD_KEY)
+        await page.click("#glowcam-root >> .lock .btn.primary")
+        await page.wait_for_function("!document.querySelector('#glowcam-root').shadowRoot.querySelector('.panel').classList.contains('locked')", timeout=10000)
+        check("Al reactivarla y meter la clave vuelve a funcionar", True)
 
         if shot:
             await page.wait_for_timeout(1500)
