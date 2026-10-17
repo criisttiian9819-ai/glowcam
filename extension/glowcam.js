@@ -12,7 +12,7 @@
   window.__glowcamLoaded = true;
   if (!window.MediaDevices || !navigator.mediaDevices) return;
 
-  const VERSION = "1.3.0";
+  const VERSION = "1.4.0";
   const DEVICE_ID = "glowcam-virtual-camera";
   const DEVICE_LABEL = "GlowCam";
   const FPS = 30;
@@ -111,19 +111,21 @@
     autoHang: store.get("autoHang", false),
     hangBtn: store.get("hangBtn", null), // botón de colgar «enseñado» por el usuario
     rotCam: store.get("rotCam", 0),
+    pillPos: store.get("pillPos", null),   // posición del botón (arrastrable)
+    panelPos: store.get("panelPos", null), // posición de la ventana (arrastrable)
   };
   // Copia de seguridad de los ajustes en la extensión (por si Snapchat borra sus datos)
-  const SYNC_KEYS = ["enabled", "source", "camId", "format", "zoom", "offX", "offY", "mirror", "loop", "monitor", "mixMic", "autoHang", "hangBtn", "rotCam"];
+  const SYNC_KEYS = ["enabled", "source", "camId", "format", "zoom", "offX", "offY", "mirror", "loop", "monitor", "mixMic", "autoHang", "hangBtn", "rotCam", "pillPos", "panelPos"];
   let syncTimer = null;
   function syncSettings() {
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => {
-      const data = {};
+      const data = { _ts: store.get("settingsTs", 0) };
       SYNC_KEYS.forEach((k) => { data[k] = S[k]; });
       if (typeof lib !== "undefined") lib.send({ type: "saveSettings", data });
     }, 300);
   }
-  const save = (k) => { store.set(k, S[k]); syncSettings(); };
+  const save = (k) => { store.set(k, S[k]); store.set("settingsTs", Date.now()); syncSettings(); };
 
   // Clave de acceso: la valida la biblioteca (extensión) contra el panel de Cristian.
   // En la página solo se guarda una caché de arranque; la respuesta real la sustituye.
@@ -136,7 +138,7 @@
   window.addEventListener("pagehide", () => {
     if (!syncTimer) return;
     clearTimeout(syncTimer);
-    const data = {};
+    const data = { _ts: store.get("settingsTs", 0) };
     SYNC_KEYS.forEach((k) => { data[k] = S[k]; });
     try { lib.send({ type: "saveSettings", data }); } catch (_) { /* nada */ }
   });
@@ -379,9 +381,23 @@
       ui.updateLicense(m);
     } else if (m.type === "settings") {
       const d = m.data || {};
+      // Solo si la copia de la extensión es más reciente que la de esta página
+      if ((d._ts || 0) <= store.get("settingsTs", 0)) { syncSettings(); return; }
       for (const k of SYNC_KEYS) if (k in d && d[k] !== undefined) { S[k] = d[k]; store.set(k, d[k]); }
+      store.set("settingsTs", d._ts || Date.now());
       videoEl.loop = !!S.loop;
       ui.syncControls();
+      if (ui.placeAll) ui.placeAll();
+    } else if (m.type === "update") {
+      if (ui.els.update) {
+        const E = ui.els;
+        E.update.replaceChildren(
+          document.createTextNode(`🆕 Hay una versión nueva de GlowCam (${m.latest}). `),
+          h("a", { href: m.url, target: "_blank", rel: "noopener" }, "Descargar"),
+          document.createTextNode(" y sustituye la carpeta GlowCam-Extension por la nueva (mismo sitio y nombre). Luego pulsa ↻ en chrome://extensions."));
+        E.update.style.display = "block";
+        E.pill.title = "GlowCam — hay una actualización";
+      }
     } else if (m.type === "count") {
       libCount = m.n;
     } else if (m.type === "select") {
@@ -768,13 +784,13 @@
   const CSS = `
   :host { all: initial; }
   * { box-sizing: border-box; font-family: -apple-system, system-ui, "Segoe UI", sans-serif; }
-  .pill { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; background: #ff5fa2; color: #141418;
+  .pill { position: fixed; left: 16px; bottom: 16px; touch-action: none; z-index: 2147483647; background: #ff5fa2; color: #141418;
     border: none; border-radius: 999px; padding: 9px 14px; font-weight: 700; font-size: 13px; cursor: pointer;
     box-shadow: 0 6px 20px rgba(0,0,0,.35); display: flex; align-items: center; gap: 7px; }
   .pill .dot { width: 9px; height: 9px; border-radius: 50%; background: #141418; opacity: .45; }
   .pill.live .dot { background: #e8102e; opacity: 1; box-shadow: 0 0 0 3px rgba(232,16,46,.25); }
   .pill.off { background: #3a3a45; color: #ddd; }
-  .panel { position: fixed; right: 16px; bottom: 64px; z-index: 2147483647; width: 320px; max-height: calc(100vh - 90px);
+  .panel { position: fixed; left: 16px; bottom: 64px; z-index: 2147483647; width: 320px; max-height: calc(100vh - 90px);
     overflow: auto; background: #141418; color: #f2f2f5; border: 1px solid #2c2c36; border-radius: 14px;
     box-shadow: 0 12px 40px rgba(0,0,0,.5); padding: 14px; font-size: 13px; display: none; }
   .panel.open { display: block; }
@@ -788,7 +804,15 @@
   .lockmsg { color: #ffcf7a; font-size: 12px; line-height: 1.45; min-height: 18px; }
   .who { margin-top: 4px; color: #8a8a96; font-size: 11px; }
   .pill.locked { background: #3a3a45; color: #ddd; }
-  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; cursor: grab; user-select: none; touch-action: none; }
+  .head:active { cursor: grabbing; }
+  .head .grip { color: #55555f; font-size: 14px; letter-spacing: -2px; margin-right: 2px; }
+  .head .right { display: flex; align-items: center; gap: 8px; }
+  .close { background: none; border: none; color: #8a8a96; font-size: 16px; cursor: pointer; padding: 2px 4px; line-height: 1; }
+  .close:hover { color: #fff; }
+  .pill.dragging, .panel.dragging { opacity: .85; }
+  .update { display: none; margin: 8px 0 0; padding: 8px 10px; background: #1d2a3a; color: #9fd0ff; border-radius: 8px; font-size: 12px; line-height: 1.4; }
+  .update a { color: #fff; font-weight: 700; }
   .title { font-size: 17px; font-weight: 800; color: #ff5fa2; }
   .switch { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; color: #c8c8d2; }
   .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #34343f; border-radius: 9px; overflow: hidden; margin-bottom: 10px; }
@@ -842,15 +866,23 @@
 
     const set = (k, v) => { S[k] = v; save(k); };
 
-    E.pill = h("button", { class: "pill" + (S.enabled ? "" : " off"), title: "GlowCam", onclick: () => {
-      E.panel.classList.toggle("open");
-      if (E.panel.classList.contains("open")) {
+    function togglePanel(force) {
+      const open = force === undefined ? !E.panel.classList.contains("open") : force;
+      E.panel.classList.toggle("open", open);
+      if (open) {
+        placePanel();
         ui.refreshVideos();
         if (S.source === "camera") startCamera().catch((e) => ui.setStatus("Cámara: " + e.message));
         else ui.refreshCameras();
       } else if (!E.pill.classList.contains("live")) {
         stopCamera(); // panel cerrado y Snapchat no la usa: apagar la cámara
       }
+    }
+    ui.togglePanel = togglePanel;
+
+    E.pill = h("button", { class: "pill" + (S.enabled ? "" : " off"), title: "GlowCam (puedes arrastrarlo)", onclick: () => {
+      if (Date.now() - (E.pill.__dragEnd || 0) < 350) return; // fue un arrastre, no un clic
+      togglePanel();
     } }, h("span", { class: "dot" }), (E.pillText = h("span", {}, licensed() ? "GlowCam" : "GlowCam 🔒")));
 
     E.enabled = h("input", { type: "checkbox", onchange: (e) => {
@@ -963,8 +995,11 @@
 
     const previewCanvas = canvas;
     E.panel = h("div", { class: "panel" + (licensed() ? "" : " locked") }, E.lock,
-      h("div", { class: "head" }, h("span", { class: "title" }, "GlowCam"),
-        h("label", { class: "switch" }, E.enabled, "Activado")),
+      (E.head = h("div", { class: "head", title: "Arrastra para mover" },
+        h("span", {}, h("span", { class: "grip" }, "⋮⋮"), h("span", { class: "title" }, "GlowCam")),
+        h("span", { class: "right" },
+        h("label", { class: "switch" }, E.enabled, "Activado"),
+          h("button", { class: "close", title: "Cerrar", onclick: () => togglePanel(false) }, "✕")))),
       h("div", { class: "seg" }, segCam, segVid),
       h("div", { class: "preview" }, previewCanvas),
       camBox, vidBox,
@@ -980,6 +1015,7 @@
           ["zoom", "offX", "offY"].forEach((k) => { set(k, k === "zoom" ? 1 : 0); E[k].value = S[k]; });
         } }, "Centrar")),
       E.status, E.who,
+      (E.update = h("div", { class: "update" })),
       h("div", { class: "hint" }, "En la videollamada elige la cámara «GlowCam». Mantén esta ventana visible durante la llamada. v" + VERSION));
 
     function rotate() {
@@ -1030,6 +1066,67 @@
     });
 
     shadow.append(E.pill, E.panel);
+
+    function clampPlace(el, pos) {
+      const w = el.offsetWidth || 120, hgt = Math.min(el.offsetHeight || 40, window.innerHeight - 8);
+      const x = Math.max(4, Math.min(window.innerWidth - w - 4, pos.x));
+      const y = Math.max(4, Math.min(window.innerHeight - hgt - 4, pos.y));
+      el.style.left = x + "px";
+      el.style.top = y + "px";
+      el.style.right = "auto";
+      el.style.bottom = "auto";
+    }
+    function placePanel() {
+      if (S.panelPos) { clampPlace(E.panel, S.panelPos); return; }
+      // Primera vez: encima del botón, alineada con él
+      const p = E.pill.getBoundingClientRect();
+      const ph = Math.min(E.panel.offsetHeight || 600, window.innerHeight - 90);
+      let y = p.top - ph - 8;
+      if (y < 4) y = Math.min(window.innerHeight - ph - 4, p.bottom + 8);
+      clampPlace(E.panel, { x: p.left, y });
+    }
+    function makeDraggable(el, handle, key) {
+      let st = null;
+      handle.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        if (handle !== el && e.target.closest && e.target.closest("input, select, label, button")) return;
+        const r = el.getBoundingClientRect();
+        st = { px: e.clientX, py: e.clientY, x: r.left, y: r.top, moved: false, id: e.pointerId };
+        try { handle.setPointerCapture(e.pointerId); } catch (_) { /* nada */ }
+      });
+      handle.addEventListener("pointermove", (e) => {
+        if (!st || e.pointerId !== st.id) return;
+        const dx = e.clientX - st.px, dy = e.clientY - st.py;
+        if (!st.moved && Math.hypot(dx, dy) < 5) return;
+        if (!st.moved) { st.moved = true; el.classList.add("dragging"); }
+        clampPlace(el, { x: st.x + dx, y: st.y + dy });
+      });
+      const end = () => {
+        if (!st) return;
+        if (st.moved) {
+          const r = el.getBoundingClientRect();
+          set(key, { x: Math.round(r.left), y: Math.round(r.top) });
+          el.__dragEnd = Date.now();
+          el.classList.remove("dragging");
+        }
+        st = null;
+      };
+      handle.addEventListener("pointerup", end);
+      handle.addEventListener("pointercancel", end);
+    }
+    makeDraggable(E.pill, E.pill, "pillPos");
+    makeDraggable(E.panel, E.head, "panelPos");
+    E.pill.addEventListener("dragstart", (e) => e.preventDefault());
+    if (S.pillPos) requestAnimationFrame(() => clampPlace(E.pill, S.pillPos));
+    window.addEventListener("resize", () => {
+      if (S.pillPos) clampPlace(E.pill, S.pillPos);
+      if (E.panel.classList.contains("open")) placePanel();
+    });
+    ui.placeAll = () => {
+      if (S.pillPos) clampPlace(E.pill, S.pillPos);
+      else { E.pill.style.cssText = ""; }
+      if (E.panel.classList.contains("open")) placePanel();
+    };
     (document.body || document.documentElement).append(host);
     ui.root = host;
   }

@@ -62,6 +62,24 @@
     }
   }
   setInterval(() => { if (parentOrigin) checkLicense(); }, RECHECK_MS);
+
+  // ---------------- aviso de versión nueva ----------------
+  const MANIFEST_URL = "https://raw.githubusercontent.com/criisttiian9819-ai/glowcam/main/extension/manifest.json";
+  const DOWNLOAD_URL = "https://github.com/criisttiian9819-ai/glowcam/releases/latest/download/GlowCam-Extension.zip";
+  function newer(a, b) {
+    const pa = String(a).split(".").map(Number), pb = String(b).split(".").map(Number);
+    for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0); }
+    return false;
+  }
+  async function checkUpdate() {
+    try {
+      const mine = chrome.runtime.getManifest().version;
+      const r = await fetch(MANIFEST_URL, { cache: "no-store", credentials: "omit" });
+      const latest = (await r.json()).version;
+      if (latest && newer(latest, mine)) post({ type: "update", latest, url: DOWNLOAD_URL });
+    } catch (_) { /* sin conexión: nada */ }
+  }
+  setInterval(() => { if (parentOrigin) checkUpdate(); }, 6 * 60 * 60 * 1000);
   let parentOrigin = null;
   let selectedId = null;
 
@@ -299,6 +317,7 @@
     if (m.type === "init") {
       parentOrigin = e.origin;
       checkLicense();
+      checkUpdate();
       try {
         const r = await chrome.storage.local.get("settings");
         if (r.settings) post({ type: "settings", data: r.settings });
