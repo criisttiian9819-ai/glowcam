@@ -20,6 +20,7 @@ jobs:
 
       - name: Probar la extensión en Chromium
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           pip install playwright
           python -m playwright install --with-deps chromium
           ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1080x1920:rate=30 -f lavfi -i sine=frequency=440 -t 6 -c:v libvpx-vp9 -b:v 1M -deadline realtime -c:a libopus test.webm
