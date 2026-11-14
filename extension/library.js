@@ -238,8 +238,51 @@
     await db.put(v);
   }
 
+  async function rename(id, newName) {
+    const v = await db.get(id);
+    if (!v) return;
+    const clean = String(newName || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    if (!clean || clean === v.name) return;
+    v.name = clean;
+    await db.put(v);
+  }
+
+  // Edición del nombre en la propia fila
+  let editing = false;
+  function startRename(row, nameEl, v) {
+    if (editing) return;
+    editing = true;
+    const input = document.createElement("input");
+    input.className = "rename";
+    input.value = v.name;
+    input.maxLength = 80;
+    input.setAttribute("aria-label", "Nuevo nombre del vídeo");
+    nameEl.replaceWith(input);
+    row.classList.add("editing");
+    input.focus();
+    // Seleccionar el nombre sin la extensión (.mp4, .mov…)
+    const dot = v.name.lastIndexOf(".");
+    input.setSelectionRange(0, dot > 0 ? dot : v.name.length);
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      editing = false;
+      if (save) await rename(v.id, input.value);
+      render();
+    };
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+
   // ---------------- interfaz ----------------
   async function render() {
+    if (editing) return;
     let vids = [];
     try { vids = await db.list(); } catch (e) { /* nada */ }
     vids.sort((a, b) => b.added - a.added);
@@ -268,6 +311,18 @@
       sub.className = "sub";
       sub.textContent = [fmt(v.duration), fmtSize(v.size || (v.blob && v.blob.size) || 0)].filter(Boolean).join(" · ");
       meta.append(name, sub);
+      const ren = document.createElement("button");
+      ren.className = "ren";
+      ren.textContent = "✏️";
+      ren.title = "Cambiar el nombre";
+      ren.addEventListener("click", (e) => {
+        e.stopPropagation();
+        startRename(row, name, v);
+      });
+      name.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        startRename(row, name, v);
+      });
       const del = document.createElement("button");
       del.className = "del";
       del.textContent = "✕";
@@ -276,8 +331,8 @@
         e.stopPropagation();
         if (confirmDelete(row, v)) remove(v.id);
       });
-      row.addEventListener("click", () => select(v.id, true));
-      row.append(img, meta, del);
+      row.addEventListener("click", () => { if (!editing) select(v.id, true); });
+      row.append(img, meta, ren, del);
       list.append(row);
     }
     $("count").textContent = vids.length ? `${vids.length} guardado${vids.length === 1 ? "" : "s"}` : "";
