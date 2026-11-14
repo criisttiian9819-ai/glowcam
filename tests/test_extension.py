@@ -229,6 +229,20 @@ async def main(video_path, shot):
         check("Se pueden guardar varios vídeos en la biblioteca", rows == 2, f"{rows} vídeos")
         thumbs = await lib.locator("img.thumb").count()
         check("Cada vídeo tiene miniatura", thumbs == 2, f"{thumbs} miniaturas")
+        # Renombrar un vídeo desde la lista (✏️ → escribir → Enter)
+        await lib.locator(".row").first.locator(".ren").click()
+        await lib.locator("input.rename").fill("Videollamada saludo")
+        await lib.locator("input.rename").press("Enter")
+        await lib.locator(".row .name", has_text="Videollamada saludo").wait_for(timeout=5000)
+        # Escape cancela sin cambiar
+        await lib.locator(".row").nth(1).locator(".ren").click()
+        await lib.locator("input.rename").fill("NO DEBE QUEDAR")
+        await lib.locator("input.rename").press("Escape")
+        await page.wait_for_timeout(400)
+        names = await lib.locator(".row .name").all_inner_texts()
+        check("Renombrar un vídeo (✏️ + Enter) y Escape cancela",
+              any("Videollamada saludo" in n for n in names) and not any("NO DEBE" in n for n in names), str(names))
+
         # Elegir el otro vídeo de la lista
         first_id = await page.evaluate("window.__glowcam.currentVideo.id")
         await lib.locator(".row:not(.sel)").first.click()
@@ -298,6 +312,8 @@ async def main(video_path, shot):
         await lib.locator(".row >> nth=1").wait_for(timeout=15000)
         n = await lib.locator(".row").count()
         check("Los vídeos siguen guardados aunque Snapchat borre sus datos", n == 2, f"{n} vídeo(s)")
+        names2 = await lib.locator(".row .name").all_inner_texts()
+        check("El nombre nuevo se queda guardado", any("Videollamada saludo" in x for x in names2), str(names2))
         await page.wait_for_function("window.__glowcam.currentVideo", timeout=10000)
         restored = await page.evaluate("({id: window.__glowcam.currentVideo.id, rot: window.__glowcam.currentVideo.rot})")
         check("Se recuerda el vídeo elegido y su giro", restored == {"id": sel_id, "rot": 90}, str(restored))
