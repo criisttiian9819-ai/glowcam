@@ -37,6 +37,7 @@ No necesita OBS, ni drivers, ni micrófono virtual. El audio del vídeo va inclu
 - **＋ Añadir vídeos** (puedes elegir varios a la vez) o arrástralos al panel.
 - Quedan **guardados para siempre dentro de la extensión**, con miniatura y duración, aunque cierres Chrome o Snapchat borre sus datos.
 - Pulsa un vídeo de la lista para ponerlo. El ✕ lo borra (pide confirmación con un segundo clic).
+- **✏️ Cambiar el nombre**: pulsa el lápiz (o doble clic en el nombre), escribe y pulsa **Enter**. **Esc** cancela. El nombre nuevo se queda guardado (el archivo original no cambia).
 - El giro se recuerda **para cada vídeo**.
 
 ### Opciones del modo vídeo
